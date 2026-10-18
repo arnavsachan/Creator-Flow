@@ -5,9 +5,9 @@ import { LoadingSkeleton } from '../states/LoadingSkeleton';
 
 export interface KpiCardProps {
   title: string;
-  value: string | number;
-  change?: string | number;
-  changePeriod?: string;
+  value?: string | number | null;
+  change?: string | number | null;
+  changePeriod?: string | null;
   trend?: 'up' | 'down' | 'neutral';
   icon?: React.ReactNode;
   sparklinePoints?: number[];
@@ -22,7 +22,7 @@ export const KpiCard: React.FC<KpiCardProps> = ({
   changePeriod = 'vs previous 28d',
   trend = 'neutral',
   icon,
-  sparklinePoints = [20, 24, 22, 28, 25, 32, 30, 38, 42, 40, 48],
+  sparklinePoints,
   loading = false,
   className,
 }) => {
@@ -47,20 +47,23 @@ export const KpiCard: React.FC<KpiCardProps> = ({
     );
   }
 
-  // Generate SVG mini sparkline path from points
-  const min = Math.min(...sparklinePoints);
-  const max = Math.max(...sparklinePoints);
-  const range = max - min || 1;
+  const hasSparkline = Boolean(sparklinePoints && sparklinePoints.length >= 2);
   const width = 120;
   const height = 24;
 
-  const points = sparklinePoints
-    .map((pt, i) => {
-      const x = (i / (sparklinePoints.length - 1)) * width;
-      const y = height - ((pt - min) / range) * (height - 4) - 2;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
+  let points = '';
+  if (hasSparkline && sparklinePoints) {
+    const min = Math.min(...sparklinePoints);
+    const max = Math.max(...sparklinePoints);
+    const range = max - min || 1;
+    points = sparklinePoints
+      .map((pt, i) => {
+        const x = (i / (sparklinePoints.length - 1)) * width;
+        const y = height - ((pt - min) / range) * (height - 4) - 2;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  }
 
   const strokeColor =
     trend === 'up'
@@ -68,6 +71,9 @@ export const KpiCard: React.FC<KpiCardProps> = ({
       : trend === 'down'
       ? '#fb7185' // rose-400
       : '#71717a'; // zinc-500
+
+  const displayValue = value === null || value === undefined ? 'Not available' : value;
+  const isUnavailable = displayValue === 'Not available';
 
   return (
     <div
@@ -90,13 +96,18 @@ export const KpiCard: React.FC<KpiCardProps> = ({
 
       {/* Main Metric Value */}
       <div className="space-y-1">
-        <div className="text-2xl font-semibold tracking-tight text-zinc-50 tabular-nums">
-          {value}
+        <div
+          className={cn(
+            'tracking-tight font-semibold tabular-nums',
+            isUnavailable ? 'text-lg font-normal text-zinc-400' : 'text-2xl text-zinc-50'
+          )}
+        >
+          {displayValue}
         </div>
 
         {/* Delta Badge & Comparison */}
         <div className="flex items-center gap-1.5 flex-wrap text-xs pt-0.5">
-          {change !== undefined && (
+          {change != null && (
             <span
               className={cn(
                 'inline-flex items-center gap-0.5 text-[11px] font-medium px-1.5 py-0.5 rounded border font-mono tabular-nums',
@@ -111,29 +122,33 @@ export const KpiCard: React.FC<KpiCardProps> = ({
               {change}
             </span>
           )}
-          <span className="text-zinc-500 text-[11px] truncate">{changePeriod}</span>
+          {changePeriod && (
+            <span className="text-zinc-500 text-[11px] truncate">{changePeriod}</span>
+          )}
         </div>
       </div>
 
       {/* Subtle Bottom Sparkline */}
-      <div className="pt-3 mt-2 border-t border-white/[0.04] flex items-center justify-between">
-        <span className="text-[10px] font-mono text-zinc-600 uppercase">28d Trend</span>
-        <svg
-          viewBox={`0 0 ${width} ${height}`}
-          className="w-24 h-4 overflow-visible"
-          aria-hidden="true"
-        >
-          <polyline
-            fill="none"
-            stroke={strokeColor}
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            points={points}
-            opacity="0.8"
-          />
-        </svg>
-      </div>
+      {hasSparkline && (
+        <div className="pt-3 mt-2 border-t border-white/[0.04] flex items-center justify-between">
+          <span className="text-[10px] font-mono text-zinc-600 uppercase">28d Trend</span>
+          <svg
+            viewBox={`0 0 ${width} ${height}`}
+            className="w-24 h-4 overflow-visible"
+            aria-hidden="true"
+          >
+            <polyline
+              fill="none"
+              stroke={strokeColor}
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={points}
+              opacity="0.8"
+            />
+          </svg>
+        </div>
+      )}
     </div>
   );
 };

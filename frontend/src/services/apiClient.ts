@@ -27,17 +27,133 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+export type ApiErrorKind =
+  | 'network'
+  | 'unauthorized'
+  | 'not_found'
+  | 'unavailable'
+  | 'unknown';
+
+export interface NormalizedApiError {
+  status?: number;
+  code?: string;
+  message: string;
+  kind: ApiErrorKind;
+  data?: unknown;
+}
+
+/**
+ * Normalizes Axios and network errors into a consistent structure.
+ * Reads body.detail (string or array), body.error.code / body.error.message, and body.message.
+ * Never includes tokens or headers in error messages.
+ */
+export function normalizeApiError(error: any): NormalizedApiError {
+  if (!error) {
+    return {
+      message: 'An unknown error occurred.',
+      kind: 'unknown',
+    };
+  }
+
+  if (error.kind && typeof error.message === 'string') {
+    return error as NormalizedApiError;
+  }
+
+  const status: number | undefined = error.response?.status;
+  const body = error.response?.data;
+
+  let code: string | undefined = undefined;
+  if (typeof body?.error?.code === 'string') {
+    code = body.error.code;
+  } else if (typeof body?.code === 'string') {
+    code = body.code;
+  }
+
+  let message: string | undefined = undefined;
+
+  if (typeof body?.error?.message === 'string' && body.error.message.trim()) {
+    message = body.error.message.trim();
+  } else if (typeof body?.detail === 'string' && body.detail.trim()) {
+    message = body.detail.trim();
+  } else if (Array.isArray(body?.detail)) {
+    message = body.detail
+      .map((item: any) => {
+        if (typeof item === 'string') return item;
+        if (item?.msg && typeof item.msg === 'string') return item.msg;
+        return JSON.stringify(item);
+      })
+      .filter(Boolean)
+      .join('; ');
+  } else if (typeof body?.message === 'string' && body.message.trim()) {
+    message = body.message.trim();
+  }
+
+  let kind: ApiErrorKind = 'unknown';
+
+  if (!error.response) {
+    kind = 'network';
+    if (!message) {
+      const rawMsg = error.message;
+      if (
+        rawMsg &&
+        !rawMsg.includes('Bearer') &&
+        !rawMsg.toLowerCase().includes('authorization') &&
+        !rawMsg.toLowerCase().includes('headers')
+      ) {
+        message = rawMsg;
+      } else {
+        message = 'Network connection failed or timed out.';
+      }
+    }
+  } else if (status === 401 || status === 403) {
+    kind = 'unauthorized';
+    if (!message) {
+      message = 'Session expired or authentication required.';
+    }
+  } else if (status === 404) {
+    kind = 'not_found';
+    if (!message) {
+      message = 'The requested channel or resource was not found.';
+    }
+  } else if (status === 503 || status === 502 || status === 504) {
+    kind = 'unavailable';
+    if (!message) {
+      message = 'Service is temporarily unavailable.';
+    }
+  } else {
+    kind = 'unknown';
+    if (!message) {
+      message = 'An unexpected server error occurred.';
+    }
+  }
+
+  let safeMessage = message || 'An unexpected error occurred.';
+
+  // Security guard: never include bearer tokens or authorization headers in error messages
+  if (
+    safeMessage.includes('Bearer') ||
+    safeMessage.toLowerCase().includes('authorization') ||
+    safeMessage.toLowerCase().includes('headers')
+  ) {
+    safeMessage = 'Authentication failed. Please check credentials.';
+  }
+
+  return {
+    status,
+    code,
+    message: safeMessage,
+    kind,
+    data: body,
+  };
+}
+
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    const normalizedError = {
-      message:
-        error.response?.data?.message ||
-        error.message ||
-        'An unexpected network error occurred.',
-      status: error.response?.status,
-      data: error.response?.data,
-    };
+    if (axios.isCancel(error)) {
+      return Promise.reject(error);
+    }
+    const normalizedError = normalizeApiError(error);
     return Promise.reject(normalizedError);
   }
 );

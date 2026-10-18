@@ -12,7 +12,7 @@ interface DataStateBannerProps {
 
 export const DataStateBanner: React.FC<DataStateBannerProps> = ({
   state,
-  lastSyncedAt = 'Just now',
+  lastSyncedAt = null,
   onRefresh,
   className,
 }) => {
@@ -33,7 +33,7 @@ export const DataStateBanner: React.FC<DataStateBannerProps> = ({
           dotColor: 'bg-amber-400',
           pulse: false,
           label: 'Cached Snapshot',
-          desc: `Upstream sync delayed. Displaying snapshot from ${lastSyncedAt || '2h ago'}`,
+          desc: `Upstream sync delayed. Displaying snapshot from ${lastSyncedAt || 'unknown'}`,
           badgeText: 'STALE',
           badgeClass: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
           borderClass: 'border-amber-950/30',
@@ -102,9 +102,9 @@ export const DataStateBanner: React.FC<DataStateBannerProps> = ({
       </div>
 
       <div className="flex items-center gap-3 shrink-0 text-zinc-500">
-        {state !== 'UNAVAILABLE' && lastSyncedAt && (
+        {state !== 'UNAVAILABLE' && (
           <span className="hidden md:inline font-mono">
-            Synced {lastSyncedAt}
+            {lastSyncedAt ? `Synced ${lastSyncedAt}` : 'Not synced yet / unknown'}
           </span>
         )}
 

@@ -1,24 +1,27 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { useAppMode } from '../../context/AppModeContext';
 import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { DataStateBanner } from '../states/DataStateBanner';
+import { dashboardSync } from '../../services/dashboardSync';
 
 export const AppLayout: React.FC = () => {
-  const { dataState, setDataState } = useAppMode();
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string>('Just now');
+  const { dataState } = useAppMode();
+  const [isSyncing, setIsSyncing] = useState<boolean>(dashboardSync.getIsSyncing());
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(dashboardSync.getLastSyncedAt());
+
+  useEffect(() => {
+    const unsubSyncing = dashboardSync.subscribeIsSyncing(setIsSyncing);
+    const unsubSyncedAt = dashboardSync.subscribeLastSyncedAt(setLastSyncedAt);
+    return () => {
+      unsubSyncing();
+      unsubSyncedAt();
+    };
+  }, []);
 
   const handleSync = () => {
-    setIsSyncing(true);
-    setTimeout(() => {
-      setIsSyncing(false);
-      setLastSyncedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-      if (dataState === 'UNAVAILABLE') {
-        setDataState('DEMO');
-      }
-    }, 800);
+    dashboardSync.triggerSync();
   };
 
   return (
