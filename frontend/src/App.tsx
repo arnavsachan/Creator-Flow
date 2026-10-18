@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { AppModeProvider } from './context/AppModeContext';
 import { AppLayout } from './components/layout/AppLayout';
@@ -13,8 +13,27 @@ import { ShortsClipperPage } from './pages/ShortsClipperPage';
 import { CompetitorsPage } from './pages/CompetitorsPage';
 import { ContentPlannerPage } from './pages/ContentPlannerPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { checkBackendHealth } from './services/apiClient';
 
 export const App: React.FC = () => {
+  useEffect(() => {
+    if (import.meta.env.DEV && import.meta.env.VITE_ENABLE_BACKEND_CHECK === 'true') {
+      checkBackendHealth().then((result) => {
+        if (result.status === 'ok') {
+          console.info(
+            `[Backend Health] Status: ${result.status} | Service: ${result.service} | Environment: ${result.environment} | Database: ${result.database}`
+          );
+        } else if (result.status === 'not_ready') {
+          console.warn(
+            `[Backend Health] Status: ${result.status} | Service: ${result.service} | Environment: ${result.environment} | Database: ${result.database}`
+          );
+        } else {
+          console.warn('[Backend Health] Backend is unreachable.');
+        }
+      });
+    }
+  }, []);
+
   return (
     <AppModeProvider initialDataState="DEMO">
       <BrowserRouter>

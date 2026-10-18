@@ -18,7 +18,6 @@ export const apiClient: AxiosInstance = axios.create(defaultConfig);
 // Interceptors can be attached here for auth tokens and consistent error handling
 apiClient.interceptors.request.use(
   (config) => {
-    // E.g. attach bearer token if present
     const token = localStorage.getItem('auth_token');
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
@@ -31,7 +30,6 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Global error normalization
     const normalizedError = {
       message:
         error.response?.data?.message ||
@@ -43,5 +41,74 @@ apiClient.interceptors.response.use(
     return Promise.reject(normalizedError);
   }
 );
+
+export type HealthStatus = 'ok' | 'not_ready' | 'unreachable';
+
+export interface BackendHealthResponse {
+  status: HealthStatus;
+  service?: string;
+  environment?: string;
+  database?: string;
+}
+
+/**
+ * Checks backend connectivity and readiness with a strict 3-second timeout.
+ * Never throws into the UI.
+ */
+export async function checkBackendHealth(): Promise<BackendHealthResponse> {
+  const rootUrl = BASE_URL.replace(/\/api\/v1\/?$/, '').replace(/\/+$/, '');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+  try {
+    const healthRes = await fetch(`${rootUrl}/health`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+
+    if (!healthRes.ok) {
+      clearTimeout(timeoutId);
+      return { status: 'unreachable' };
+    }
+
+    const healthData = await healthRes.json();
+
+    const readyRes = await fetch(`${rootUrl}/health/ready`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (readyRes.status === 200) {
+      const readyData = await readyRes.json();
+      return {
+        status: 'ok',
+        service: healthData.service,
+        environment: healthData.environment,
+        database: readyData.database,
+      };
+    } else if (readyRes.status === 503) {
+      const readyData = await readyRes.json();
+      return {
+        status: 'not_ready',
+        service: healthData.service,
+        environment: healthData.environment,
+        database: readyData.database,
+      };
+    }
+
+    return {
+      status: 'not_ready',
+      service: healthData.service,
+      environment: healthData.environment,
+    };
+  } catch {
+    clearTimeout(timeoutId);
+    return { status: 'unreachable' };
+  }
+}
 
 export default apiClient;
