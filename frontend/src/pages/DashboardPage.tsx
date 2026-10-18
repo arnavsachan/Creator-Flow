@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   Area,
@@ -10,6 +10,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  AlertCircle,
   ArrowRight,
   Clock,
   DollarSign,
@@ -18,6 +19,7 @@ import {
   Flame,
   Image,
   MoreVertical,
+  RefreshCw,
   Scissors,
   Sparkles,
   TrendingUp,
@@ -26,10 +28,12 @@ import {
 import { useAppMode } from '../context/AppModeContext';
 import { KpiCard } from '../components/ui/KpiCard';
 import { ErrorState } from '../components/states/ErrorState';
+import { getDashboardOverview } from '../services/dashboardService';
+import type { DashboardOverviewData } from '../types/dashboard';
 import { cn } from '../utils/cn';
 
-// Sample time-series data for the primary performance chart
-const CHART_DATA = [
+// Baseline fallback data for offline / initial rendering
+const DEFAULT_CHART_DATA = [
   { date: 'Oct 01', views: 34200, watchTime: 1820, subscribers: 120 },
   { date: 'Oct 04', views: 42100, watchTime: 2190, subscribers: 195 },
   { date: 'Oct 07', views: 38900, watchTime: 1980, subscribers: 160 },
@@ -42,17 +46,7 @@ const CHART_DATA = [
   { date: 'Oct 28', views: 104200, watchTime: 6240, subscribers: 780 },
 ];
 
-interface RecentVideo {
-  id: string;
-  title: string;
-  published: string;
-  views: string;
-  avd: string;
-  ctr: string;
-  ctrStatus: 'high' | 'normal' | 'low';
-}
-
-const RECENT_VIDEOS: RecentVideo[] = [
+const DEFAULT_RECENT_VIDEOS = [
   {
     id: 'vid-1',
     title: 'Why 90% of AI Agents Fail in Production (System Architecture)',
@@ -60,7 +54,7 @@ const RECENT_VIDEOS: RecentVideo[] = [
     views: '142,850',
     avd: '8:42 (62%)',
     ctr: '8.4%',
-    ctrStatus: 'high',
+    ctrStatus: 'high' as const,
   },
   {
     id: 'vid-2',
@@ -69,7 +63,7 @@ const RECENT_VIDEOS: RecentVideo[] = [
     views: '98,420',
     avd: '7:15 (54%)',
     ctr: '6.9%',
-    ctrStatus: 'high',
+    ctrStatus: 'high' as const,
   },
   {
     id: 'vid-3',
@@ -78,7 +72,7 @@ const RECENT_VIDEOS: RecentVideo[] = [
     views: '76,190',
     avd: '5:30 (41%)',
     ctr: '4.8%',
-    ctrStatus: 'normal',
+    ctrStatus: 'normal' as const,
   },
   {
     id: 'vid-4',
@@ -87,7 +81,7 @@ const RECENT_VIDEOS: RecentVideo[] = [
     views: '64,300',
     avd: '6:50 (49%)',
     ctr: '5.2%',
-    ctrStatus: 'normal',
+    ctrStatus: 'normal' as const,
   },
   {
     id: 'vid-5',
@@ -96,49 +90,126 @@ const RECENT_VIDEOS: RecentVideo[] = [
     views: '112,040',
     avd: '9:12 (68%)',
     ctr: '7.8%',
-    ctrStatus: 'high',
+    ctrStatus: 'high' as const,
   },
 ];
 
-interface PipelineItem {
-  title: string;
-  format: 'Long-form' | 'Short';
-  stage: 'Idea' | 'Scripting' | 'Editing' | 'Ready';
-  scheduledDate: string;
-}
-
-const PIPELINE_ITEMS: PipelineItem[] = [
+const DEFAULT_PIPELINE_ITEMS = [
   {
     title: 'Building a Multi-Agent YouTube Production Engine',
-    format: 'Long-form',
-    stage: 'Scripting',
+    format: 'Long-form' as const,
+    stage: 'Scripting' as const,
     scheduledDate: 'Tomorrow, 14:00',
   },
   {
     title: '3 Mistakes Ruining Your Video Retention Hook',
-    format: 'Short',
-    stage: 'Ready',
+    format: 'Short' as const,
+    stage: 'Ready' as const,
     scheduledDate: 'Oct 20, 18:30',
   },
   {
     title: 'Creator Economy Monetization Math Breakdown',
-    format: 'Long-form',
-    stage: 'Editing',
+    format: 'Long-form' as const,
+    stage: 'Editing' as const,
     scheduledDate: 'Oct 22, 16:00',
   },
   {
     title: 'FastAPI vs Node for YouTube Data Webhooks',
-    format: 'Long-form',
-    stage: 'Idea',
+    format: 'Long-form' as const,
+    stage: 'Idea' as const,
     scheduledDate: 'Oct 26',
   },
 ];
 
 export const DashboardPage: React.FC = () => {
-  const { dataState, setDataState } = useAppMode();
+  const { dataState, setDataState, selectedChannelId } = useAppMode();
   const navigate = useNavigate();
   const [metricTab, setMetricTab] = useState<'views' | 'watchTime' | 'subscribers'>('views');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+
+  // Phase 1.5 Real API Integration State
+  const [overviewData, setOverviewData] = useState<DashboardOverviewData | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const retryControllerRef = useRef<AbortController | null>(null);
+
+  // Clean up any in-flight manual retry when component unmounts
+  useEffect(() => {
+    return () => {
+      if (retryControllerRef.current) {
+        retryControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    const controller = new AbortController();
+
+    async function loadData() {
+      setLoading(true);
+      setApiError(null);
+      try {
+        const response = await getDashboardOverview(selectedChannelId, controller.signal);
+        if (isMounted) {
+          setOverviewData(response.data);
+          if (response.data_state) {
+            setDataState(response.data_state);
+          }
+          setLoading(false);
+        }
+      } catch (err: unknown) {
+        // If aborted by channel switch or unmount, ignore without logging or updating state
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (isMounted) {
+          console.warn('[DashboardPage] API overview request failed:', err);
+          setApiError('Backend overview API unreachable. Falling back to cached local data.');
+          setLoading(false);
+        }
+      }
+    }
+
+    loadData();
+
+    return () => {
+      isMounted = false;
+      controller.abort();
+    };
+  }, [selectedChannelId, setDataState]);
+
+  const handleManualRetry = () => {
+    if (loading) return; // Prevent duplicate retry requests while loading
+
+    if (retryControllerRef.current) {
+      retryControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    retryControllerRef.current = controller;
+
+    setLoading(true);
+    setApiError(null);
+
+    getDashboardOverview(selectedChannelId, controller.signal)
+      .then((res) => {
+        if (!controller.signal.aborted) {
+          setOverviewData(res.data);
+          if (res.data_state) {
+            setDataState(res.data_state);
+          }
+          setLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        console.warn('[DashboardPage] Manual retry failed:', err);
+        setApiError('Retry failed. Operating with baseline demo metrics.');
+        setLoading(false);
+      });
+  };
 
   if (dataState === 'UNAVAILABLE') {
     return (
@@ -159,65 +230,101 @@ export const DashboardPage: React.FC = () => {
       dataKey: 'views',
       formatter: (v: number) => `${(v / 1000).toFixed(1)}k`,
       fullFormatter: (v: number) => `${v.toLocaleString()} views`,
-      stroke: '#6366F1', // Clean subtle indigo
+      stroke: '#6366F1',
     },
     watchTime: {
       label: 'Watch Time (hrs)',
       dataKey: 'watchTime',
       formatter: (v: number) => `${v}h`,
       fullFormatter: (v: number) => `${v.toLocaleString()} hours`,
-      stroke: '#38BDF8', // Sky
+      stroke: '#38BDF8',
     },
     subscribers: {
       label: 'Net Subscribers',
       dataKey: 'subscribers',
       formatter: (v: number) => `+${v}`,
       fullFormatter: (v: number) => `+${v.toLocaleString()} subs`,
-      stroke: '#34D399', // Emerald
+      stroke: '#34D399',
     },
   };
 
   const currentMetric = metricConfigs[metricTab];
 
+  // Prevent displaying stale metrics after channel switches:
+  // If overviewData was fetched for another channel, fall back to null during transition
+  const channelData = overviewData?.channel_id === selectedChannelId ? overviewData : null;
+  const m = channelData?.metrics;
+  const chartData = channelData?.chart_data ?? DEFAULT_CHART_DATA;
+  const recentVideos = channelData?.recent_videos ?? DEFAULT_RECENT_VIDEOS;
+  const pipelineItems = channelData?.pipeline_items ?? DEFAULT_PIPELINE_ITEMS;
+
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
+      {/* API Connection Warning Banner (if request fails) */}
+      {apiError && (
+        <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>{apiError}</span>
+          </div>
+          <button
+            onClick={handleManualRetry}
+            disabled={loading}
+            type="button"
+            className={cn(
+              'inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500/20 text-amber-200 font-medium transition-colors',
+              loading
+                ? 'opacity-60 cursor-not-allowed'
+                : 'hover:bg-amber-500/30 cursor-pointer'
+            )}
+          >
+            <RefreshCw className={cn('w-3 h-3', loading && 'animate-spin')} />
+            <span>{loading ? 'Retrying...' : 'Retry Connection'}</span>
+          </button>
+        </div>
+      )}
+
       {/* ROW 1: 4 Precision Metric Cards */}
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard
-          title="Total Views"
-          value="1,428,900"
-          change="+18.4%"
-          trend="up"
-          changePeriod="vs previous 28d"
+          title={m?.totalViews.title ?? 'Total Views'}
+          value={m?.totalViews.value ?? '1,428,900'}
+          change={m?.totalViews.change ?? '+18.4%'}
+          trend={m?.totalViews.trend ?? 'up'}
+          changePeriod={m?.totalViews.changePeriod ?? 'vs previous 28d'}
           icon={<Eye />}
-          sparklinePoints={[28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82]}
+          sparklinePoints={m?.totalViews.sparklinePoints ?? [28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82]}
+          loading={loading}
         />
         <KpiCard
-          title="Net Subscribers"
-          value="+4,820"
-          change="+12.6%"
-          trend="up"
-          changePeriod="vs previous 28d"
+          title={m?.netSubscribers.title ?? 'Net Subscribers'}
+          value={m?.netSubscribers.value ?? '+4,820'}
+          change={m?.netSubscribers.change ?? '+12.6%'}
+          trend={m?.netSubscribers.trend ?? 'up'}
+          changePeriod={m?.netSubscribers.changePeriod ?? 'vs previous 28d'}
           icon={<Users />}
-          sparklinePoints={[10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48]}
+          sparklinePoints={m?.netSubscribers.sparklinePoints ?? [10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48]}
+          loading={loading}
         />
         <KpiCard
-          title="Watch Time (hrs)"
-          value="48,250"
-          change="+24.1%"
-          trend="up"
-          changePeriod="vs previous 28d"
+          title={m?.watchTime.title ?? 'Watch Time (hrs)'}
+          value={m?.watchTime.value ?? '48,250'}
+          change={m?.watchTime.change ?? '+24.1%'}
+          trend={m?.watchTime.trend ?? 'up'}
+          changePeriod={m?.watchTime.changePeriod ?? 'vs previous 28d'}
           icon={<Clock />}
-          sparklinePoints={[35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85]}
+          sparklinePoints={m?.watchTime.sparklinePoints ?? [35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85]}
+          loading={loading}
         />
         <KpiCard
-          title="Est. Partner Revenue"
-          value="$3,842.10"
-          change="-2.1%"
-          trend="down"
-          changePeriod="RPM $3.42"
+          title={m?.estimatedRevenue.title ?? 'Est. Partner Revenue'}
+          value={m?.estimatedRevenue.value ?? '$3,842.10'}
+          change={m?.estimatedRevenue.change ?? '-2.1%'}
+          trend={m?.estimatedRevenue.trend ?? 'down'}
+          changePeriod={m?.estimatedRevenue.changePeriod ?? 'RPM $3.42'}
           icon={<DollarSign />}
-          sparklinePoints={[45, 48, 50, 47, 44, 46, 42, 40, 43, 41, 39]}
+          sparklinePoints={m?.estimatedRevenue.sparklinePoints ?? [45, 48, 50, 47, 44, 46, 42, 40, 43, 41, 39]}
+          loading={loading}
         />
       </section>
 
@@ -259,7 +366,7 @@ export const DashboardPage: React.FC = () => {
           {/* Interactive Recharts Canvas */}
           <div className="h-72 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={CHART_DATA} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <defs>
                   <linearGradient id="metricGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor={currentMetric.stroke} stopOpacity={0.12} />
@@ -426,88 +533,96 @@ export const DashboardPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/40">
-                {RECENT_VIDEOS.map((vid) => (
-                  <tr key={vid.id} className="hover:bg-zinc-900/40 transition-colors group">
-                    {/* Video with 16:9 placeholder thumbnail */}
-                    <td className="py-3 pr-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-14 h-8 shrink-0 rounded bg-zinc-800 border border-zinc-700/50 flex items-center justify-center text-[9px] font-mono text-zinc-500">
-                          16:9
-                        </div>
-                        <div className="min-w-0 max-w-[240px]">
-                          <div className="text-zinc-200 font-medium truncate group-hover:text-white transition-colors">
-                            {vid.title}
-                          </div>
-                          <div className="text-[11px] text-zinc-500">{vid.published}</div>
-                        </div>
-                      </div>
-                    </td>
-
-                    {/* Views */}
-                    <td className="py-3 text-right font-mono text-zinc-200 tabular-nums">
-                      {vid.views}
-                    </td>
-
-                    {/* AVD */}
-                    <td className="py-3 text-right font-mono text-zinc-400 tabular-nums">
-                      {vid.avd}
-                    </td>
-
-                    {/* CTR */}
-                    <td className="py-3 text-right">
-                      <span
-                        className={cn(
-                          'inline-flex font-mono text-[11px] px-1.5 py-0.5 rounded border tabular-nums',
-                          vid.ctrStatus === 'high'
-                            ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-                            : 'text-zinc-400 bg-zinc-800/80 border-zinc-700/60'
-                        )}
-                      >
-                        {vid.ctr}
-                      </span>
-                    </td>
-
-                    {/* Action Menu */}
-                    <td className="py-3 text-right relative">
-                      <button
-                        onClick={() =>
-                          setActiveMenuId(activeMenuId === vid.id ? null : vid.id)
-                        }
-                        type="button"
-                        className="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
-                      >
-                        <MoreVertical className="w-3.5 h-3.5" />
-                      </button>
-
-                      {activeMenuId === vid.id && (
-                        <div className="absolute right-0 top-8 z-20 w-44 rounded-md bg-[#18181B] border border-zinc-800 shadow-xl py-1 text-left text-xs">
-                          <button
-                            onClick={() => {
-                              setActiveMenuId(null);
-                              navigate('/thumbnail-analyzer');
-                            }}
-                            type="button"
-                            className="w-full px-3 py-1.5 text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
-                          >
-                            <Image className="w-3.5 h-3.5 text-zinc-400" />
-                            <span>Analyze Thumbnail</span>
-                          </button>
-                          <button
-                            onClick={() => {
-                              setActiveMenuId(null);
-                              navigate('/script-generator');
-                            }}
-                            type="button"
-                            className="w-full px-3 py-1.5 text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
-                          >
-                            <FileText className="w-3.5 h-3.5 text-zinc-400" />
-                            <span>Generate Follow-up</span>
-                          </button>
-                        </div>
-                      )}
+                {recentVideos.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-zinc-500 font-mono text-xs">
+                      No recent video uploads recorded for this channel.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  recentVideos.map((vid) => (
+                    <tr key={vid.id} className="hover:bg-zinc-900/40 transition-colors group">
+                      {/* Video with 16:9 placeholder thumbnail */}
+                      <td className="py-3 pr-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-14 h-8 shrink-0 rounded bg-zinc-800 border border-zinc-700/50 flex items-center justify-center text-[9px] font-mono text-zinc-500">
+                            16:9
+                          </div>
+                          <div className="min-w-0 max-w-[240px]">
+                            <div className="text-zinc-200 font-medium truncate group-hover:text-white transition-colors">
+                              {vid.title}
+                            </div>
+                            <div className="text-[11px] text-zinc-500">{vid.published}</div>
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Views */}
+                      <td className="py-3 text-right font-mono text-zinc-200 tabular-nums">
+                        {vid.views}
+                      </td>
+
+                      {/* AVD */}
+                      <td className="py-3 text-right font-mono text-zinc-400 tabular-nums">
+                        {vid.avd}
+                      </td>
+
+                      {/* CTR */}
+                      <td className="py-3 text-right">
+                        <span
+                          className={cn(
+                            'inline-flex font-mono text-[11px] px-1.5 py-0.5 rounded border tabular-nums',
+                            vid.ctrStatus === 'high'
+                              ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                              : 'text-zinc-400 bg-zinc-800/80 border-zinc-700/60'
+                          )}
+                        >
+                          {vid.ctr}
+                        </span>
+                      </td>
+
+                      {/* Action Menu */}
+                      <td className="py-3 text-right relative">
+                        <button
+                          onClick={() =>
+                            setActiveMenuId(activeMenuId === vid.id ? null : vid.id)
+                          }
+                          type="button"
+                          className="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                        >
+                          <MoreVertical className="w-3.5 h-3.5" />
+                        </button>
+
+                        {activeMenuId === vid.id && (
+                          <div className="absolute right-0 top-8 z-20 w-44 rounded-md bg-[#18181B] border border-zinc-800 shadow-xl py-1 text-left text-xs">
+                            <button
+                              onClick={() => {
+                                setActiveMenuId(null);
+                                navigate('/thumbnail-analyzer');
+                              }}
+                              type="button"
+                              className="w-full px-3 py-1.5 text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2 cursor-pointer"
+                            >
+                              <Image className="w-3.5 h-3.5 text-zinc-400" />
+                              <span>Analyze Thumbnail</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                setActiveMenuId(null);
+                                navigate('/script-generator');
+                              }}
+                              type="button"
+                              className="w-full px-3 py-1.5 text-zinc-300 hover:text-white hover:bg-zinc-800 flex items-center gap-2 cursor-pointer"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-zinc-400" />
+                              <span>Generate Follow-up</span>
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -533,32 +648,38 @@ export const DashboardPage: React.FC = () => {
             </div>
 
             <div className="space-y-2">
-              {PIPELINE_ITEMS.map((item, idx) => (
-                <div
-                  key={idx}
-                  className="p-2.5 rounded-md bg-[#09090B] border border-zinc-800/80 flex items-center justify-between gap-3 text-xs"
-                >
-                  <div className="min-w-0">
-                    <div className="text-zinc-200 font-medium truncate">{item.title}</div>
-                    <div className="text-[11px] text-zinc-500">{item.scheduledDate}</div>
-                  </div>
-                  <span
-                    className={cn(
-                      'shrink-0 text-[10px] font-mono px-2 py-0.5 rounded border uppercase',
-                      item.stage === 'Ready' &&
-                        'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-                      item.stage === 'Editing' &&
-                        'text-indigo-400 bg-indigo-500/10 border-indigo-500/20',
-                      item.stage === 'Scripting' &&
-                        'text-amber-400 bg-amber-500/10 border-amber-500/20',
-                      item.stage === 'Idea' &&
-                        'text-zinc-400 bg-zinc-800/80 border-zinc-700/60'
-                    )}
-                  >
-                    {item.stage}
-                  </span>
+              {pipelineItems.length === 0 ? (
+                <div className="p-4 text-center text-zinc-500 font-mono text-xs">
+                  No upcoming content scheduled.
                 </div>
-              ))}
+              ) : (
+                pipelineItems.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2.5 rounded-md bg-[#09090B] border border-zinc-800/80 flex items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-zinc-200 font-medium truncate">{item.title}</div>
+                      <div className="text-[11px] text-zinc-500">{item.scheduledDate}</div>
+                    </div>
+                    <span
+                      className={cn(
+                        'shrink-0 text-[10px] font-mono px-2 py-0.5 rounded border uppercase',
+                        item.stage === 'Ready' &&
+                          'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+                        item.stage === 'Editing' &&
+                          'text-indigo-400 bg-indigo-500/10 border-indigo-500/20',
+                        item.stage === 'Scripting' &&
+                          'text-amber-400 bg-amber-500/10 border-amber-500/20',
+                        item.stage === 'Idea' &&
+                          'text-zinc-400 bg-zinc-800/80 border-zinc-700/60'
+                      )}
+                    >
+                      {item.stage}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 

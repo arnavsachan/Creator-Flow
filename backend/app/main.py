@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.health import router as health_router
 from app.core.config import get_settings
 
@@ -29,6 +30,12 @@ def create_application() -> FastAPI:
 
     # Mount health router at root: /health and /health/ready
     app.include_router(health_router)
+
+    # Mount API v1 business routers
+    app.include_router(
+        dashboard_router,
+        prefix=f"{settings.API_V1_PREFIX}/dashboard",
+    )
 
     return app
 
