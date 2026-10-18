@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import {
   Area,
   AreaChart,
@@ -29,10 +30,13 @@ import { useAppMode } from '../context/AppModeContext';
 import { KpiCard } from '../components/ui/KpiCard';
 import { ErrorState } from '../components/states/ErrorState';
 import { getDashboardOverview } from '../services/dashboardService';
+import { normalizeApiError, type NormalizedApiError } from '../services/apiClient';
+import { dashboardSync } from '../services/dashboardSync';
+import { isDemoChannel } from '../utils/channelMode';
 import type { DashboardOverviewData, RecentVideoItem } from '../types/dashboard';
 import { cn } from '../utils/cn';
 
-// Baseline fallback data for offline / initial rendering
+// Baseline fallback data for DEMO channels only
 const DEFAULT_CHART_DATA = [
   { date: 'Oct 01', views: 34200, watchTime: 1820, subscribers: 120 },
   { date: 'Oct 04', views: 42100, watchTime: 2190, subscribers: 195 },
@@ -132,13 +136,19 @@ export const DashboardPage: React.FC = () => {
   const [metricTab, setMetricTab] = useState<'views' | 'watchTime' | 'subscribers'>('views');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
-  // Phase 1.5 Real API Integration State
   const [overviewData, setOverviewData] = useState<DashboardOverviewData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<NormalizedApiError | null>(null);
+
+  const isDemo = isDemoChannel(selectedChannelId);
+  const activeChannelIdRef = useRef<string>(selectedChannelId);
   const retryControllerRef = useRef<AbortController | null>(null);
 
-  // Clean up any in-flight manual retry when component unmounts
+  useEffect(() => {
+    activeChannelIdRef.current = selectedChannelId;
+  }, [selectedChannelId]);
+
+  // Clean up any in-flight retry when component unmounts
   useEffect(() => {
     return () => {
       if (retryControllerRef.current) {
@@ -154,25 +164,35 @@ export const DashboardPage: React.FC = () => {
     async function loadData() {
       setLoading(true);
       setApiError(null);
+      dashboardSync.setIsSyncing(true);
       try {
         const response = await getDashboardOverview(selectedChannelId, controller.signal);
-        if (isMounted) {
+        if (isMounted && activeChannelIdRef.current === selectedChannelId) {
           setOverviewData(response.data);
+          dashboardSync.setLastSyncedAt(response.last_synced_at ?? null);
           if (response.data_state) {
             setDataState(response.data_state);
           }
           setLoading(false);
+          dashboardSync.setIsSyncing(false);
         }
       } catch (err: unknown) {
-        // If aborted by channel switch or unmount, ignore without logging or updating state
-        if (controller.signal.aborted) {
+        if (
+          controller.signal.aborted ||
+          axios.isCancel(err) ||
+          !isMounted ||
+          activeChannelIdRef.current !== selectedChannelId
+        ) {
           return;
         }
-        if (isMounted) {
-          console.warn('[DashboardPage] API overview request failed:', err);
-          setApiError('Backend overview API unreachable. Falling back to cached local data.');
-          setLoading(false);
+        const normalized = normalizeApiError(err);
+        console.warn('[DashboardPage] API overview request failed:', normalized);
+        setApiError(normalized);
+        if (normalized.kind === 'unavailable') {
+          setDataState('UNAVAILABLE');
         }
+        setLoading(false);
+        dashboardSync.setIsSyncing(false);
       }
     }
 
@@ -184,8 +204,9 @@ export const DashboardPage: React.FC = () => {
     };
   }, [selectedChannelId, setDataState]);
 
-  const handleManualRetry = () => {
-    if (loading) return; // Prevent duplicate retry requests while loading
+  const handleManualRetry = useCallback(() => {
+    if (loading) return;
+    const targetChannel = activeChannelIdRef.current;
 
     if (retryControllerRef.current) {
       retryControllerRef.current.abort();
@@ -195,38 +216,46 @@ export const DashboardPage: React.FC = () => {
 
     setLoading(true);
     setApiError(null);
+    dashboardSync.setIsSyncing(true);
 
-    getDashboardOverview(selectedChannelId, controller.signal)
+    getDashboardOverview(targetChannel, controller.signal)
       .then((res) => {
-        if (!controller.signal.aborted) {
-          setOverviewData(res.data);
-          if (res.data_state) {
-            setDataState(res.data_state);
-          }
-          setLoading(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
           return;
         }
-        console.warn('[DashboardPage] Manual retry failed:', err);
-        setApiError('Retry failed. Operating with baseline demo metrics.');
+        setOverviewData(res.data);
+        dashboardSync.setLastSyncedAt(res.last_synced_at ?? null);
+        if (res.data_state) {
+          setDataState(res.data_state);
+        }
         setLoading(false);
+        dashboardSync.setIsSyncing(false);
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
+          return;
+        }
+        const normalized = normalizeApiError(err);
+        console.warn('[DashboardPage] Manual retry failed:', normalized);
+        setApiError(normalized);
+        if (normalized.kind === 'unavailable') {
+          setDataState('UNAVAILABLE');
+        }
+        setLoading(false);
+        dashboardSync.setIsSyncing(false);
       });
-  };
+  }, [loading, setDataState]);
 
-  if (dataState === 'UNAVAILABLE') {
-    return (
-      <div className="max-w-4xl mx-auto py-16">
-        <ErrorState
-          title="Creator Telemetry Disconnected"
-          message="Unable to reach the YouTube Data Ingestion Pipeline. Ensure backend worker services are online or revert to DEMO mode."
-          onRetry={() => setDataState('DEMO')}
-        />
-      </div>
-    );
-  }
+  // Listen to manual sync triggers from Topbar/DataStateBanner
+  useEffect(() => {
+    const unsubscribe = dashboardSync.subscribeSyncTrigger(() => {
+      handleManualRetry();
+    });
+    return unsubscribe;
+  }, [handleManualRetry]);
+
+  // Prevent displaying stale metrics after channel switches
+  const channelData = overviewData?.channelId === selectedChannelId ? overviewData : null;
 
   // Active chart configurations
   const metricConfigs = {
@@ -255,22 +284,259 @@ export const DashboardPage: React.FC = () => {
 
   const currentMetric = metricConfigs[metricTab];
 
-  // Prevent displaying stale metrics after channel switches:
-  // If overviewData was fetched for another channel, fall back to null during transition
-  const channelData = overviewData?.channelId === selectedChannelId ? overviewData : null;
+  // DISTINCT STATE HANDLING FOR LIVE CHANNELS
+  if (!isDemo) {
+    // State 1: 401 Unauthorized / Session Expired
+    if (apiError && (apiError.kind === 'unauthorized' || apiError.status === 401)) {
+      return (
+        <div className="max-w-4xl mx-auto py-16" data-testid="error-unauthorized">
+          <ErrorState
+            title="Session Expired / Authentication Required"
+            message={apiError.message || 'Your session has expired or authentication is invalid. Please sign in again.'}
+            onRetry={handleManualRetry}
+          />
+        </div>
+      );
+    }
+
+    // State 2: 404 Channel Not Found (generic message as backend 404 semantics are unconfirmed)
+    if (apiError && (apiError.kind === 'not_found' || apiError.status === 404)) {
+      return (
+        <div className="max-w-4xl mx-auto py-16" data-testid="error-not-found">
+          <ErrorState
+            title="Channel Not Found"
+            message={apiError.message || 'The requested channel could not be found. Please select a valid channel.'}
+            onRetry={handleManualRetry}
+          />
+        </div>
+      );
+    }
+
+    // State 3: Network Error / Timeout (when no prior data exists)
+    if (apiError && apiError.kind === 'network' && !channelData) {
+      return (
+        <div className="max-w-4xl mx-auto py-16" data-testid="error-network">
+          <ErrorState
+            title="Network Connection Error"
+            message={apiError.message || 'Failed to reach creator telemetry service. Please check your network connection.'}
+            onRetry={handleManualRetry}
+          />
+        </div>
+      );
+    }
+
+    // State 4: UNAVAILABLE without existing channel data
+    if ((dataState === 'UNAVAILABLE' || apiError?.kind === 'unavailable') && !channelData) {
+      return (
+        <div className="max-w-4xl mx-auto py-16" data-testid="error-unavailable">
+          <ErrorState
+            title="Creator Telemetry Disconnected"
+            message="Unable to reach the YouTube Data Ingestion Pipeline. Ensure backend worker services are online."
+            onRetry={handleManualRetry}
+          />
+        </div>
+      );
+    }
+
+    // State 5: Generic failure without data
+    if (apiError && !channelData) {
+      return (
+        <div className="max-w-4xl mx-auto py-16" data-testid="error-generic">
+          <ErrorState
+            title="Telemetry Stream Error"
+            message={apiError.message || 'An unexpected error occurred while loading channel telemetry.'}
+            onRetry={handleManualRetry}
+          />
+        </div>
+      );
+    }
+
+    // State 6: Empty valid response (data is null or empty)
+    if (!loading && !apiError && !channelData) {
+      return (
+        <div className="max-w-xl mx-auto py-16 text-center space-y-3" data-testid="empty-state">
+          <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700/60 flex items-center justify-center mx-auto text-zinc-400">
+            <AlertCircle className="w-5 h-5" />
+          </div>
+          <h3 className="text-sm font-semibold text-zinc-200">No Telemetry Recorded</h3>
+          <p className="text-xs text-zinc-400 max-w-sm mx-auto">
+            No analytics telemetry has been recorded yet for this channel.
+          </p>
+          <button
+            onClick={handleManualRetry}
+            disabled={loading}
+            type="button"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700/80 transition-colors cursor-pointer"
+          >
+            <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+            <span>Refresh Metrics</span>
+          </button>
+        </div>
+      );
+    }
+  } else {
+    // For DEMO channel, if UNAVAILABLE:
+    if (dataState === 'UNAVAILABLE' && !channelData) {
+      return (
+        <div className="max-w-4xl mx-auto py-16">
+          <ErrorState
+            title="Creator Telemetry Disconnected"
+            message="Unable to reach the YouTube Data Ingestion Pipeline. Ensure backend worker services are online."
+            onRetry={handleManualRetry}
+          />
+        </div>
+      );
+    }
+  }
+
+  // KPI calculations:
+  // LIVE channel: NEVER render DEFAULT_CHART_DATA, DEFAULT_RECENT_VIDEOS, DEFAULT_PIPELINE_ITEMS
+  // or hardcoded KPI strings like '1,428,900', '+18.4%'.
+  // DEMO channel: render existing demo fallbacks.
   const kpis = channelData?.kpis;
-  const chartData = channelData?.velocityChart ?? DEFAULT_CHART_DATA;
-  const recentVideos = channelData?.recentVideos ?? DEFAULT_RECENT_VIDEOS;
-  const pipelineItems = channelData?.contentPipeline ?? DEFAULT_PIPELINE_ITEMS;
+
+  const totalViewsValue = isDemo
+    ? (kpis?.totalViews.formattedValue ?? '1,428,900')
+    : (kpis?.totalViews ? kpis.totalViews.formattedValue : '—');
+  const totalViewsChange = isDemo
+    ? (kpis?.totalViews.formattedChange ?? '+18.4%')
+    : kpis?.totalViews?.formattedChange;
+  const totalViewsTrend = isDemo
+    ? (kpis?.totalViews.trend ?? 'up')
+    : (kpis?.totalViews?.trend ?? 'neutral');
+  const totalViewsPeriod = isDemo
+    ? (kpis?.totalViews.changePeriod ?? 'vs previous 28d')
+    : (kpis?.totalViews?.changePeriod ?? 'vs previous 28d');
+  const totalViewsSparkline = isDemo
+    ? (kpis?.totalViews.sparklinePoints ?? [28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82])
+    : (kpis?.totalViews?.sparklinePoints ?? []);
+
+  const netSubscribersValue = isDemo
+    ? (kpis?.netSubscribers.formattedValue ?? '+4,820')
+    : (kpis?.netSubscribers ? kpis.netSubscribers.formattedValue : '—');
+  const netSubscribersChange = isDemo
+    ? (kpis?.netSubscribers.formattedChange ?? '+12.6%')
+    : kpis?.netSubscribers?.formattedChange;
+  const netSubscribersTrend = isDemo
+    ? (kpis?.netSubscribers.trend ?? 'up')
+    : (kpis?.netSubscribers?.trend ?? 'neutral');
+  const netSubscribersPeriod = isDemo
+    ? (kpis?.netSubscribers.changePeriod ?? 'vs previous 28d')
+    : (kpis?.netSubscribers?.changePeriod ?? 'vs previous 28d');
+  const netSubscribersSparkline = isDemo
+    ? (kpis?.netSubscribers.sparklinePoints ?? [10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48])
+    : (kpis?.netSubscribers?.sparklinePoints ?? []);
+
+  const watchTimeValue = isDemo
+    ? (kpis?.watchTimeHours.formattedValue ?? '48,250')
+    : (kpis?.watchTimeHours ? kpis.watchTimeHours.formattedValue : '—');
+  const watchTimeChange = isDemo
+    ? (kpis?.watchTimeHours.formattedChange ?? '+24.1%')
+    : kpis?.watchTimeHours?.formattedChange;
+  const watchTimeTrend = isDemo
+    ? (kpis?.watchTimeHours.trend ?? 'up')
+    : (kpis?.watchTimeHours?.trend ?? 'neutral');
+  const watchTimePeriod = isDemo
+    ? (kpis?.watchTimeHours.changePeriod ?? 'vs previous 28d')
+    : (kpis?.watchTimeHours?.changePeriod ?? 'vs previous 28d');
+  const watchTimeSparkline = isDemo
+    ? (kpis?.watchTimeHours.sparklinePoints ?? [35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85])
+    : (kpis?.watchTimeHours?.sparklinePoints ?? []);
+
+  // Revenue: if estimatedPartnerRevenue is null/undefined, render "Not available".
+  // Never render $0 or a default number for missing revenue.
+  const revenueValue = kpis?.estimatedPartnerRevenue
+    ? kpis.estimatedPartnerRevenue.formattedValue
+    : isDemo
+    ? '$3,842.10'
+    : 'Not available';
+  const revenueChange = kpis?.estimatedPartnerRevenue
+    ? kpis.estimatedPartnerRevenue.formattedChange
+    : isDemo
+    ? '-2.1%'
+    : undefined;
+  const revenueTrend = kpis?.estimatedPartnerRevenue
+    ? kpis.estimatedPartnerRevenue.trend
+    : isDemo
+    ? 'down'
+    : 'neutral';
+  const revenuePeriod = kpis?.estimatedPartnerRevenue
+    ? kpis.estimatedPartnerRevenue.changePeriod
+    : isDemo
+    ? 'RPM $3.42'
+    : undefined;
+  const revenueSparkline = kpis?.estimatedPartnerRevenue
+    ? kpis.estimatedPartnerRevenue.sparklinePoints
+    : isDemo
+    ? [45, 48, 50, 47, 44, 46, 42, 40, 43, 41, 39]
+    : [];
+
+  const chartData = channelData?.velocityChart ?? (isDemo ? DEFAULT_CHART_DATA : []);
+  const recentVideos = channelData?.recentVideos ?? (isDemo ? DEFAULT_RECENT_VIDEOS : []);
+  const pipelineItems = channelData?.contentPipeline ?? (isDemo ? DEFAULT_PIPELINE_ITEMS : []);
+  const actionableInsights = channelData?.actionableInsights ?? [];
 
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
-      {/* API Connection Warning Banner (if request fails) */}
-      {apiError && (
-        <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between gap-3">
+      {/* UNAVAILABLE Banner with Retry */}
+      {(dataState === 'UNAVAILABLE' || apiError?.kind === 'unavailable') && (
+        <div
+          data-testid="unavailable-banner"
+          className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>Creator telemetry service unavailable. Showing offline snapshot.</span>
+          </div>
+          <button
+            onClick={handleManualRetry}
+            disabled={loading}
+            type="button"
+            className={cn(
+              'inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-500/20 text-rose-200 font-medium transition-colors',
+              loading ? 'opacity-60 cursor-not-allowed' : 'hover:bg-rose-500/30 cursor-pointer'
+            )}
+          >
+            <RefreshCw className={cn('w-3 h-3', loading && 'animate-spin')} />
+            <span>{loading ? 'Retrying...' : 'Retry Connection'}</span>
+          </button>
+        </div>
+      )}
+
+      {/* STALE Banner (no demo fallback) */}
+      {dataState === 'STALE' && (
+        <div
+          data-testid="stale-banner"
+          className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between gap-3"
+        >
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
-            <span>{apiError}</span>
+            <span>Upstream sync delayed. Displaying cached channel snapshot.</span>
+          </div>
+          <button
+            onClick={handleManualRetry}
+            disabled={loading}
+            type="button"
+            className={cn(
+              'inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500/20 text-amber-200 font-medium transition-colors',
+              loading ? 'opacity-60 cursor-not-allowed' : 'hover:bg-amber-500/30 cursor-pointer'
+            )}
+          >
+            <RefreshCw className={cn('w-3 h-3', loading && 'animate-spin')} />
+            <span>{loading ? 'Syncing...' : 'Sync Now'}</span>
+          </button>
+        </div>
+      )}
+
+      {/* API Connection Warning Banner (if request fails while cached data is displayed) */}
+      {apiError && dataState !== 'UNAVAILABLE' && apiError.kind !== 'unavailable' && (
+        <div
+          data-testid="api-error-banner"
+          className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>{apiError.message}</span>
           </div>
           <button
             onClick={handleManualRetry}
@@ -293,42 +559,42 @@ export const DashboardPage: React.FC = () => {
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard
           title={kpis?.totalViews.title ?? 'Total Views'}
-          value={kpis?.totalViews.formattedValue ?? '1,428,900'}
-          change={kpis?.totalViews.formattedChange ?? '+18.4%'}
-          trend={kpis?.totalViews.trend ?? 'up'}
-          changePeriod={kpis?.totalViews.changePeriod ?? 'vs previous 28d'}
+          value={totalViewsValue}
+          change={totalViewsChange}
+          trend={totalViewsTrend}
+          changePeriod={totalViewsPeriod}
           icon={<Eye />}
-          sparklinePoints={kpis?.totalViews.sparklinePoints ?? [28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82]}
+          sparklinePoints={totalViewsSparkline}
           loading={loading}
         />
         <KpiCard
           title={kpis?.netSubscribers.title ?? 'Net Subscribers'}
-          value={kpis?.netSubscribers.formattedValue ?? '+4,820'}
-          change={kpis?.netSubscribers.formattedChange ?? '+12.6%'}
-          trend={kpis?.netSubscribers.trend ?? 'up'}
-          changePeriod={kpis?.netSubscribers.changePeriod ?? 'vs previous 28d'}
+          value={netSubscribersValue}
+          change={netSubscribersChange}
+          trend={netSubscribersTrend}
+          changePeriod={netSubscribersPeriod}
           icon={<Users />}
-          sparklinePoints={kpis?.netSubscribers.sparklinePoints ?? [10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48]}
+          sparklinePoints={netSubscribersSparkline}
           loading={loading}
         />
         <KpiCard
           title={kpis?.watchTimeHours.title ?? 'Watch Time (hrs)'}
-          value={kpis?.watchTimeHours.formattedValue ?? '48,250'}
-          change={kpis?.watchTimeHours.formattedChange ?? '+24.1%'}
-          trend={kpis?.watchTimeHours.trend ?? 'up'}
-          changePeriod={kpis?.watchTimeHours.changePeriod ?? 'vs previous 28d'}
+          value={watchTimeValue}
+          change={watchTimeChange}
+          trend={watchTimeTrend}
+          changePeriod={watchTimePeriod}
           icon={<Clock />}
-          sparklinePoints={kpis?.watchTimeHours.sparklinePoints ?? [35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85]}
+          sparklinePoints={watchTimeSparkline}
           loading={loading}
         />
         <KpiCard
           title={kpis?.estimatedPartnerRevenue?.title ?? 'Est. Partner Revenue'}
-          value={kpis?.estimatedPartnerRevenue?.formattedValue ?? '$3,842.10'}
-          change={kpis?.estimatedPartnerRevenue?.formattedChange ?? '-2.1%'}
-          trend={kpis?.estimatedPartnerRevenue?.trend ?? 'down'}
-          changePeriod={kpis?.estimatedPartnerRevenue?.changePeriod ?? 'RPM $3.42'}
+          value={revenueValue}
+          change={revenueChange}
+          trend={revenueTrend}
+          changePeriod={revenuePeriod}
           icon={<DollarSign />}
-          sparklinePoints={kpis?.estimatedPartnerRevenue?.sparklinePoints ?? [45, 48, 50, 47, 44, 46, 42, 40, 43, 41, 39]}
+          sparklinePoints={revenueSparkline}
           loading={loading}
         />
       </section>
@@ -368,57 +634,63 @@ export const DashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Interactive Recharts Canvas */}
+          {/* Interactive Recharts Canvas / Empty State */}
           <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="metricGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={currentMetric.stroke} stopOpacity={0.12} />
-                    <stop offset="95%" stopColor={currentMetric.stroke} stopOpacity={0.0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272A" vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  stroke="#71717A"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={{ stroke: '#27272A' }}
-                />
-                <YAxis
-                  stroke="#71717A"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={false}
-                  tickFormatter={currentMetric.formatter}
-                />
-                <Tooltip
-                  content={({ active, payload, label }) => {
-                    if (active && payload && payload.length) {
-                      const val = payload[0].value as number;
-                      return (
-                        <div className="bg-[#141418] border border-zinc-800 p-2.5 rounded-md shadow-xl text-xs space-y-1">
-                          <div className="text-zinc-400 font-mono text-[11px]">{label}</div>
-                          <div className="text-zinc-100 font-semibold tabular-nums text-sm">
-                            {currentMetric.fullFormatter(val)}
+            {chartData.length === 0 ? (
+              <div className="h-full w-full flex flex-col items-center justify-center text-zinc-500 font-mono text-xs border border-dashed border-zinc-800 rounded-md">
+                No velocity chart telemetry recorded for this channel.
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="metricGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={currentMetric.stroke} stopOpacity={0.12} />
+                      <stop offset="95%" stopColor={currentMetric.stroke} stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272A" vertical={false} />
+                  <XAxis
+                    dataKey="date"
+                    stroke="#71717A"
+                    fontSize={11}
+                    tickLine={false}
+                    axisLine={{ stroke: '#27272A' }}
+                  />
+                  <YAxis
+                    stroke="#71717A"
+                    fontSize={11}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={currentMetric.formatter}
+                  />
+                  <Tooltip
+                    content={({ active, payload, label }) => {
+                      if (active && payload && payload.length) {
+                        const val = payload[0].value as number;
+                        return (
+                          <div className="bg-[#141418] border border-zinc-800 p-2.5 rounded-md shadow-xl text-xs space-y-1">
+                            <div className="text-zinc-400 font-mono text-[11px]">{label}</div>
+                            <div className="text-zinc-100 font-semibold tabular-nums text-sm">
+                              {currentMetric.fullFormatter(val)}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    }
-                    return null;
-                  }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey={currentMetric.dataKey}
-                  stroke={currentMetric.stroke}
-                  strokeWidth={1.5}
-                  fillOpacity={1}
-                  fill="url(#metricGradient)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+                        );
+                      }
+                      return null;
+                    }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey={currentMetric.dataKey}
+                    stroke={currentMetric.stroke}
+                    strokeWidth={1.5}
+                    fillOpacity={1}
+                    fill="url(#metricGradient)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -439,68 +711,101 @@ export const DashboardPage: React.FC = () => {
           </div>
 
           <div className="space-y-3">
-            {/* Diagnostic Item 1 */}
-            <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors">
-              <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
-                <span className="flex items-center gap-1.5">
-                  <Flame className="w-3.5 h-3.5 text-amber-400" />
-                  High Retention Outlier
-                </span>
-                <span className="text-[10px] text-emerald-400 font-mono">+38% Hook</span>
-              </div>
-              <p className="text-[11px] font-mono text-zinc-400">
-                'AI Agents Fail in Prod' held 72% at 0:30 vs 44% baseline.
-              </p>
-              <Link
-                to="/shorts-generator"
-                className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
-              >
-                <span>Clip into High-CTR Short</span>
-                <ArrowRight className="w-3 h-3 text-zinc-500" />
-              </Link>
-            </div>
+            {actionableInsights.length > 0 ? (
+              actionableInsights.map((insight) => (
+                <div
+                  key={insight.id}
+                  className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors"
+                >
+                  <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      {insight.title}
+                    </span>
+                    <span className="text-[10px] text-emerald-400 font-mono">
+                      {insight.badgeLabel}
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-400">{insight.description}</p>
+                  <Link
+                    to={insight.actionUrl}
+                    className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
+                  >
+                    <span>{insight.actionText}</span>
+                    <ArrowRight className="w-3 h-3 text-zinc-500" />
+                  </Link>
+                </div>
+              ))
+            ) : isDemo ? (
+              <>
+                {/* Diagnostic Item 1 */}
+                <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors">
+                  <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
+                    <span className="flex items-center gap-1.5">
+                      <Flame className="w-3.5 h-3.5 text-amber-400" />
+                      High Retention Outlier
+                    </span>
+                    <span className="text-[10px] text-emerald-400 font-mono">+38% Hook</span>
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-400">
+                    'AI Agents Fail in Prod' held 72% at 0:30 vs 44% baseline.
+                  </p>
+                  <Link
+                    to="/shorts-generator"
+                    className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
+                  >
+                    <span>Clip into High-CTR Short</span>
+                    <ArrowRight className="w-3 h-3 text-zinc-500" />
+                  </Link>
+                </div>
 
-            {/* Diagnostic Item 2 */}
-            <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors">
-              <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
-                <span className="flex items-center gap-1.5">
-                  <Image className="w-3.5 h-3.5 text-indigo-400" />
-                  Thumbnail CTR Decay
-                </span>
-                <span className="text-[10px] text-rose-400 font-mono">-2.4% CTR</span>
-              </div>
-              <p className="text-[11px] font-mono text-zinc-400">
-                Impressions up 220% on 'Vector Search' but CTR dropped to 4.8%.
-              </p>
-              <Link
-                to="/thumbnail-analyzer"
-                className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
-              >
-                <span>Audit Thumbnail Contrast</span>
-                <ArrowRight className="w-3 h-3 text-zinc-500" />
-              </Link>
-            </div>
+                {/* Diagnostic Item 2 */}
+                <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors">
+                  <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
+                    <span className="flex items-center gap-1.5">
+                      <Image className="w-3.5 h-3.5 text-indigo-400" />
+                      Thumbnail CTR Decay
+                    </span>
+                    <span className="text-[10px] text-rose-400 font-mono">-2.4% CTR</span>
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-400">
+                    Impressions up 220% on 'Vector Search' but CTR dropped to 4.8%.
+                  </p>
+                  <Link
+                    to="/thumbnail-analyzer"
+                    className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
+                  >
+                    <span>Audit Thumbnail Contrast</span>
+                    <ArrowRight className="w-3 h-3 text-zinc-500" />
+                  </Link>
+                </div>
 
-            {/* Diagnostic Item 3 */}
-            <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors">
-              <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
-                <span className="flex items-center gap-1.5">
-                  <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
-                  Unexploited Keyword Gap
-                </span>
-                <span className="text-[10px] text-indigo-400 font-mono">High Demand</span>
+                {/* Diagnostic Item 3 */}
+                <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800/80 space-y-1.5 hover:border-zinc-700 transition-colors">
+                  <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
+                    <span className="flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+                      Unexploited Keyword Gap
+                    </span>
+                    <span className="text-[10px] text-indigo-400 font-mono">High Demand</span>
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-400">
+                    Competitors gaining search share on 'Local LLM Agent RAG'.
+                  </p>
+                  <Link
+                    to="/script-generator"
+                    className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
+                  >
+                    <span>Generate Hook in Script Studio</span>
+                    <ArrowRight className="w-3 h-3 text-zinc-500" />
+                  </Link>
+                </div>
+              </>
+            ) : (
+              <div className="p-4 text-center text-zinc-500 font-mono text-xs">
+                No diagnostic anomalies identified for this channel.
               </div>
-              <p className="text-[11px] font-mono text-zinc-400">
-                Competitors gaining search share on 'Local LLM Agent RAG'.
-              </p>
-              <Link
-                to="/script-generator"
-                className="inline-flex items-center gap-1 text-[11px] text-zinc-300 hover:text-white font-medium pt-1"
-              >
-                <span>Generate Hook in Script Studio</span>
-                <ArrowRight className="w-3 h-3 text-zinc-500" />
-              </Link>
-            </div>
+            )}
           </div>
         </div>
       </section>
