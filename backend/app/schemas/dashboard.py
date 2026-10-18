@@ -24,7 +24,7 @@ class KpiMetric(CamelModel):
     formatted_value: str
     change: float | int
     formatted_change: str
-    trend: Literal["up", "down", "neutral"] = "neutral"
+    trend: Literal["up", "down", "neutral"]
     change_period: str = "vs previous 28d"
     sparkline_points: list[float | int] = Field(default_factory=list)
 
@@ -92,7 +92,7 @@ class DashboardOverviewResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    data_state: DataState = Field(default="DEMO", serialization_alias="data_state")
+    data_state: DataState = Field(..., serialization_alias="data_state")
     last_synced_at: Optional[str] = Field(default=None, serialization_alias="last_synced_at")
     message: Optional[str] = None
     data: Optional[DashboardOverviewData] = None

@@ -1,6 +1,5 @@
 from app.schemas.dashboard import (
     ActionableInsight,
-    CamelModel,
     DashboardKpis,
     DashboardOverviewData,
     DashboardOverviewResponse,
@@ -14,7 +13,6 @@ from app.schemas.dashboard import (
 
 __all__ = [
     "ActionableInsight",
-    "CamelModel",
     "DashboardKpis",
     "DashboardOverviewData",
     "DashboardOverviewResponse",
