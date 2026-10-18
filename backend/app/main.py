@@ -31,11 +31,8 @@ def create_application() -> FastAPI:
     # Mount health router at root: /health and /health/ready
     app.include_router(health_router)
 
-    # Mount API v1 business routers
-    app.include_router(
-        dashboard_router,
-        prefix=f"{settings.API_V1_PREFIX}/dashboard",
-    )
+    # Mount dashboard router under /api/v1 (router has prefix="/dashboard")
+    app.include_router(dashboard_router, prefix=settings.API_V1_PREFIX)
 
     return app
 

@@ -1,21 +1,27 @@
 from app.schemas.dashboard import (
     ActionableInsight,
-    DashboardMetrics,
+    CamelModel,
+    DashboardKpis,
     DashboardOverviewData,
     DashboardOverviewResponse,
+    DataState,
+    ErrorDetail,
     KpiMetric,
-    PerformanceChartPoint,
     PipelineItem,
     RecentVideoItem,
+    VelocityChartPoint,
 )
 
 __all__ = [
     "ActionableInsight",
-    "DashboardMetrics",
+    "CamelModel",
+    "DashboardKpis",
     "DashboardOverviewData",
     "DashboardOverviewResponse",
+    "DataState",
+    "ErrorDetail",
     "KpiMetric",
-    "PerformanceChartPoint",
     "PipelineItem",
     "RecentVideoItem",
+    "VelocityChartPoint",
 ]

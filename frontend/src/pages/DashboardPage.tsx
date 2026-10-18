@@ -29,7 +29,7 @@ import { useAppMode } from '../context/AppModeContext';
 import { KpiCard } from '../components/ui/KpiCard';
 import { ErrorState } from '../components/states/ErrorState';
 import { getDashboardOverview } from '../services/dashboardService';
-import type { DashboardOverviewData } from '../types/dashboard';
+import type { DashboardOverviewData, RecentVideoItem } from '../types/dashboard';
 import { cn } from '../utils/cn';
 
 // Baseline fallback data for offline / initial rendering
@@ -46,12 +46,13 @@ const DEFAULT_CHART_DATA = [
   { date: 'Oct 28', views: 104200, watchTime: 6240, subscribers: 780 },
 ];
 
-const DEFAULT_RECENT_VIDEOS = [
+const DEFAULT_RECENT_VIDEOS: RecentVideoItem[] = [
   {
     id: 'vid-1',
     title: 'Why 90% of AI Agents Fail in Production (System Architecture)',
     published: '3 days ago',
-    views: '142,850',
+    views: 142850,
+    formattedViews: '142,850',
     avd: '8:42 (62%)',
     ctr: '8.4%',
     ctrStatus: 'high' as const,
@@ -60,7 +61,8 @@ const DEFAULT_RECENT_VIDEOS = [
     id: 'vid-2',
     title: 'We Built an Autonomous YouTube Studio in 48 Hours',
     published: '1 week ago',
-    views: '98,420',
+    views: 98420,
+    formattedViews: '98,420',
     avd: '7:15 (54%)',
     ctr: '6.9%',
     ctrStatus: 'high' as const,
@@ -69,7 +71,8 @@ const DEFAULT_RECENT_VIDEOS = [
     id: 'vid-3',
     title: 'Stop Using Basic Prompting: Vector Graph Search Explained',
     published: '2 weeks ago',
-    views: '76,190',
+    views: 76190,
+    formattedViews: '76,190',
     avd: '5:30 (41%)',
     ctr: '4.8%',
     ctrStatus: 'normal' as const,
@@ -78,7 +81,8 @@ const DEFAULT_RECENT_VIDEOS = [
     id: 'vid-4',
     title: 'Python vs Rust for Real-time Video Ingestion Pipelines',
     published: '3 weeks ago',
-    views: '64,300',
+    views: 64300,
+    formattedViews: '64,300',
     avd: '6:50 (49%)',
     ctr: '5.2%',
     ctrStatus: 'normal' as const,
@@ -87,7 +91,8 @@ const DEFAULT_RECENT_VIDEOS = [
     id: 'vid-5',
     title: 'The Clean Monorepo Architecture Blueprint for 2026',
     published: '1 month ago',
-    views: '112,040',
+    views: 112040,
+    formattedViews: '112,040',
     avd: '9:12 (68%)',
     ctr: '7.8%',
     ctrStatus: 'high' as const,
@@ -252,11 +257,11 @@ export const DashboardPage: React.FC = () => {
 
   // Prevent displaying stale metrics after channel switches:
   // If overviewData was fetched for another channel, fall back to null during transition
-  const channelData = overviewData?.channel_id === selectedChannelId ? overviewData : null;
-  const m = channelData?.metrics;
-  const chartData = channelData?.chart_data ?? DEFAULT_CHART_DATA;
-  const recentVideos = channelData?.recent_videos ?? DEFAULT_RECENT_VIDEOS;
-  const pipelineItems = channelData?.pipeline_items ?? DEFAULT_PIPELINE_ITEMS;
+  const channelData = overviewData?.channelId === selectedChannelId ? overviewData : null;
+  const kpis = channelData?.kpis;
+  const chartData = channelData?.velocityChart ?? DEFAULT_CHART_DATA;
+  const recentVideos = channelData?.recentVideos ?? DEFAULT_RECENT_VIDEOS;
+  const pipelineItems = channelData?.contentPipeline ?? DEFAULT_PIPELINE_ITEMS;
 
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
@@ -287,43 +292,43 @@ export const DashboardPage: React.FC = () => {
       {/* ROW 1: 4 Precision Metric Cards */}
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard
-          title={m?.totalViews.title ?? 'Total Views'}
-          value={m?.totalViews.value ?? '1,428,900'}
-          change={m?.totalViews.change ?? '+18.4%'}
-          trend={m?.totalViews.trend ?? 'up'}
-          changePeriod={m?.totalViews.changePeriod ?? 'vs previous 28d'}
+          title={kpis?.totalViews.title ?? 'Total Views'}
+          value={kpis?.totalViews.formattedValue ?? '1,428,900'}
+          change={kpis?.totalViews.formattedChange ?? '+18.4%'}
+          trend={kpis?.totalViews.trend ?? 'up'}
+          changePeriod={kpis?.totalViews.changePeriod ?? 'vs previous 28d'}
           icon={<Eye />}
-          sparklinePoints={m?.totalViews.sparklinePoints ?? [28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82]}
+          sparklinePoints={kpis?.totalViews.sparklinePoints ?? [28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82]}
           loading={loading}
         />
         <KpiCard
-          title={m?.netSubscribers.title ?? 'Net Subscribers'}
-          value={m?.netSubscribers.value ?? '+4,820'}
-          change={m?.netSubscribers.change ?? '+12.6%'}
-          trend={m?.netSubscribers.trend ?? 'up'}
-          changePeriod={m?.netSubscribers.changePeriod ?? 'vs previous 28d'}
+          title={kpis?.netSubscribers.title ?? 'Net Subscribers'}
+          value={kpis?.netSubscribers.formattedValue ?? '+4,820'}
+          change={kpis?.netSubscribers.formattedChange ?? '+12.6%'}
+          trend={kpis?.netSubscribers.trend ?? 'up'}
+          changePeriod={kpis?.netSubscribers.changePeriod ?? 'vs previous 28d'}
           icon={<Users />}
-          sparklinePoints={m?.netSubscribers.sparklinePoints ?? [10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48]}
+          sparklinePoints={kpis?.netSubscribers.sparklinePoints ?? [10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48]}
           loading={loading}
         />
         <KpiCard
-          title={m?.watchTime.title ?? 'Watch Time (hrs)'}
-          value={m?.watchTime.value ?? '48,250'}
-          change={m?.watchTime.change ?? '+24.1%'}
-          trend={m?.watchTime.trend ?? 'up'}
-          changePeriod={m?.watchTime.changePeriod ?? 'vs previous 28d'}
+          title={kpis?.watchTimeHours.title ?? 'Watch Time (hrs)'}
+          value={kpis?.watchTimeHours.formattedValue ?? '48,250'}
+          change={kpis?.watchTimeHours.formattedChange ?? '+24.1%'}
+          trend={kpis?.watchTimeHours.trend ?? 'up'}
+          changePeriod={kpis?.watchTimeHours.changePeriod ?? 'vs previous 28d'}
           icon={<Clock />}
-          sparklinePoints={m?.watchTime.sparklinePoints ?? [35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85]}
+          sparklinePoints={kpis?.watchTimeHours.sparklinePoints ?? [35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85]}
           loading={loading}
         />
         <KpiCard
-          title={m?.estimatedRevenue.title ?? 'Est. Partner Revenue'}
-          value={m?.estimatedRevenue.value ?? '$3,842.10'}
-          change={m?.estimatedRevenue.change ?? '-2.1%'}
-          trend={m?.estimatedRevenue.trend ?? 'down'}
-          changePeriod={m?.estimatedRevenue.changePeriod ?? 'RPM $3.42'}
+          title={kpis?.estimatedPartnerRevenue?.title ?? 'Est. Partner Revenue'}
+          value={kpis?.estimatedPartnerRevenue?.formattedValue ?? '$3,842.10'}
+          change={kpis?.estimatedPartnerRevenue?.formattedChange ?? '-2.1%'}
+          trend={kpis?.estimatedPartnerRevenue?.trend ?? 'down'}
+          changePeriod={kpis?.estimatedPartnerRevenue?.changePeriod ?? 'RPM $3.42'}
           icon={<DollarSign />}
-          sparklinePoints={m?.estimatedRevenue.sparklinePoints ?? [45, 48, 50, 47, 44, 46, 42, 40, 43, 41, 39]}
+          sparklinePoints={kpis?.estimatedPartnerRevenue?.sparklinePoints ?? [45, 48, 50, 47, 44, 46, 42, 40, 43, 41, 39]}
           loading={loading}
         />
       </section>
@@ -559,7 +564,7 @@ export const DashboardPage: React.FC = () => {
 
                       {/* Views */}
                       <td className="py-3 text-right font-mono text-zinc-200 tabular-nums">
-                        {vid.views}
+                        {vid.formattedViews ?? vid.views.toLocaleString()}
                       </td>
 
                       {/* AVD */}
