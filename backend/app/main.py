@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.health import router as health_router
+from app.api.routes.thumbnails import router as thumbnails_router
 from app.core.config import get_settings
 
 
@@ -33,6 +34,9 @@ def create_application() -> FastAPI:
 
     # Mount dashboard router under /api/v1 (router has prefix="/dashboard")
     app.include_router(dashboard_router, prefix=settings.API_V1_PREFIX)
+
+    # Mount thumbnails router under /api/v1 (router has prefix="/thumbnails")
+    app.include_router(thumbnails_router, prefix=settings.API_V1_PREFIX)
 
     return app
 
