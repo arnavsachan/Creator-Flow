@@ -37,16 +37,36 @@ REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
 
+YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+YOUTUBE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+
+
+def has_analytics_permission(channel: Optional[ConnectedChannel]) -> bool:
+    """
+    Checks whether the given connected channel has been granted YouTube Analytics API permissions
+    by inspecting the actual scope string recorded from Google OAuth.
+    """
+    if not channel or not channel.scope:
+        return False
+    scopes = set(channel.scope.split())
+    return (
+        YOUTUBE_ANALYTICS_SCOPE in scopes
+        or "yt-analytics.readonly" in channel.scope
+        or "https://www.googleapis.com/auth/yt-analytics.monetary.readonly" in scopes
+    )
+
 
 def start_youtube_oauth(
     db: Session,
     user: User,
     redirect_uri: Optional[str] = None,
+    include_analytics: bool = False,
 ) -> tuple[str, str]:
     """
     Initiates Google OAuth 2.0 flow for YouTube channel connection.
     Generates state and PKCE verifier/challenge, persists state in DB,
     and returns (authorization_url, state).
+    If include_analytics is True, adds the yt-analytics.readonly scope.
     """
     settings = get_settings()
     actual_redirect_uri = redirect_uri or settings.GOOGLE_REDIRECT_URI
@@ -65,11 +85,15 @@ def start_youtube_oauth(
     db.add(oauth_state)
     db.commit()
 
+    scopes = list(REQUIRED_SCOPES)
+    if include_analytics and YOUTUBE_ANALYTICS_SCOPE not in scopes:
+        scopes.append(YOUTUBE_ANALYTICS_SCOPE)
+
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "redirect_uri": actual_redirect_uri,
         "response_type": "code",
-        "scope": " ".join(REQUIRED_SCOPES),
+        "scope": " ".join(scopes),
         "access_type": "offline",
         "prompt": "consent",  # Ensures refresh token is provided
         "state": state,
@@ -376,6 +400,8 @@ def refresh_access_token(db: Session, channel: ConnectedChannel) -> str:
             channel.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
             if new_refresh_token:
                 channel.encrypted_refresh_token = encrypt_token(new_refresh_token)
+            if token_data.get("scope"):
+                channel.scope = token_data.get("scope")
             channel.status = "connected"
             db.commit()
             return new_access_token
@@ -384,6 +410,9 @@ def refresh_access_token(db: Session, channel: ConnectedChannel) -> str:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to reach Google OAuth service to refresh token.",
         ) from exc
+
+
+get_valid_access_token = refresh_access_token
 
 
 def disconnect_channel(db: Session, user: User) -> bool:

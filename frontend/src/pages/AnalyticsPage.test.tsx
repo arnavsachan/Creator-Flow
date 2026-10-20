@@ -201,4 +201,120 @@ describe('AnalyticsPage Tests', () => {
     exportBtn.click();
     expect(createElementSpy).toHaveBeenCalledWith('a');
   });
+
+  it('renders authorization banner and triggers OAuth when button is clicked', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'live_auth_test',
+        channelId: 'UC_AUTH_TEST',
+        title: 'Auth Channel',
+        subscriberCount: 50,
+        videoCount: 10,
+        viewCount: 1500,
+        status: 'connected',
+        connectedAt: '2026-10-20T10:00:00Z',
+        lastSyncedAt: '2026-10-20T16:00:00Z',
+      },
+    });
+
+    mockGetChannelAnalytics.mockResolvedValue({
+      channelId: 'UC_AUTH_TEST',
+      title: 'Auth Channel',
+      dataState: 'LIVE',
+      isLive: true,
+      hasAnalyticsScope: false,
+      totalViews: 1500,
+      totalSubscribers: 50,
+      totalVideos: 10,
+      trafficSources: null,
+      retentionChart: null,
+      timeSeries: null,
+      authorizationUrl: null,
+      scopeLimitationNotice: null,
+    });
+
+    const mockStartOAuth = vi.mocked(youtubeService.startOAuth);
+    mockStartOAuth.mockResolvedValue({
+      authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?scope=yt-analytics.readonly',
+      state: 'test-state',
+    });
+
+    render(
+      <AppModeProvider>
+        <AnalyticsPage />
+      </AppModeProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authorize-analytics-banner')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/Unlock YouTube Analytics Reporting/i)).toBeInTheDocument();
+    const authBtn = screen.getByTestId('authorize-analytics-button');
+    expect(authBtn).toBeInTheDocument();
+
+    authBtn.click();
+    expect(mockStartOAuth).toHaveBeenCalledWith({ includeAnalytics: true });
+  });
+
+  it('renders live traffic sources and daily performance when analytics permission is granted', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'live_granted_test',
+        channelId: 'UC_GRANTED_TEST',
+        title: 'Granted Channel',
+        subscriberCount: 200,
+        videoCount: 15,
+        viewCount: 25000,
+        status: 'connected',
+        connectedAt: '2026-10-20T10:00:00Z',
+        lastSyncedAt: '2026-10-20T16:00:00Z',
+      },
+    });
+
+    mockGetChannelAnalytics.mockResolvedValue({
+      channelId: 'UC_GRANTED_TEST',
+      title: 'Granted Channel',
+      dataState: 'LIVE',
+      isLive: true,
+      hasAnalyticsScope: true,
+      totalViews: 25000,
+      totalSubscribers: 200,
+      totalVideos: 15,
+      trafficSources: [
+        { source: 'Suggested Videos', views: 12000, percentage: '48.0%', change: '' },
+        { source: 'YouTube Search', views: 8000, percentage: '32.0%', change: '' },
+      ],
+      retentionChart: null,
+      timeSeries: [
+        {
+          date: '2026-10-18',
+          views: 450,
+          estimatedMinutesWatched: 1350,
+          averageViewDurationSeconds: 180,
+          subscribersGained: 5,
+          subscribersLost: 1,
+        },
+      ],
+      scopeLimitationNotice: null,
+    });
+
+    render(
+      <AppModeProvider>
+        <AnalyticsPage />
+      </AppModeProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Suggested Videos')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByTestId('authorize-analytics-banner')).not.toBeInTheDocument();
+    expect(screen.getByText('12,000')).toBeInTheDocument();
+    expect(screen.getByText('48.0%')).toBeInTheDocument();
+    expect(screen.getByText('YouTube Search')).toBeInTheDocument();
+    expect(screen.getByText('8,000')).toBeInTheDocument();
+  });
 });

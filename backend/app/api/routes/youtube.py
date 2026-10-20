@@ -12,6 +12,8 @@ from app.db.session import get_db
 from app.models.channel import ConnectedChannel
 from app.models.user import User
 from app.schemas.youtube import (
+    AnalyticsDayPoint,
+    AnalyticsOverviewReportResponse,
     AnalyticsTelemetryResponse,
     AudienceTelemetryResponse,
     ChannelHistoryResponse,
@@ -21,18 +23,26 @@ from app.schemas.youtube import (
     ConnectedChannelResponse,
     ConnectionStatusResponse,
     DisconnectResponse,
+    GeographicAudienceReportResponse,
     GeographicViewerItem,
     OAuthCallbackRequest,
     OAuthStartResponse,
     RetentionPoint,
     TrafficSourceItem,
+    TrafficSourcesReportResponse,
 )
 from app.services.dashboard import format_relative_time
+from app.services.youtube_analytics import (
+    fetch_channel_overview_report,
+    fetch_geography_report,
+    fetch_traffic_sources_report,
+)
 from app.services.youtube_oauth import (
     disconnect_channel,
     get_channel_snapshots,
     get_channel_videos,
     get_user_connected_channel,
+    has_analytics_permission,
     process_oauth_callback,
     start_youtube_oauth,
     sync_channel_metrics,
@@ -51,6 +61,7 @@ router = APIRouter(prefix="/youtube", tags=["YouTube OAuth"])
 )
 def oauth_start(
     redirect_uri: Optional[str] = Query(default=None, description="Custom redirect URI if different from default"),
+    include_analytics: bool = Query(default=False, description="Whether to request yt-analytics.readonly scope"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> OAuthStartResponse:
@@ -58,10 +69,12 @@ def oauth_start(
         db=db,
         user=current_user,
         redirect_uri=redirect_uri,
+        include_analytics=include_analytics,
     )
     return OAuthStartResponse(
         authorization_url=auth_url,
         state=state,
+        include_analytics=include_analytics,
     )
 
 
@@ -221,6 +234,7 @@ def list_user_channels(
 )
 def get_channel_analytics(
     channel_id: Optional[str] = Query(default=None),
+    days: int = Query(default=28, ge=1, le=365),
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> AnalyticsTelemetryResponse:
@@ -246,6 +260,32 @@ def get_channel_analytics(
         .first()
     )
     if channel and channel.status == "connected":
+        has_analytics = has_analytics_permission(channel)
+        traffic_sources = None
+        time_series = None
+        scope_notice = None
+        auth_url = None
+
+        if has_analytics:
+            try:
+                traffic_report = fetch_traffic_sources_report(db, channel, days=days)
+                traffic_sources = traffic_report.traffic_sources if traffic_report.traffic_sources else []
+                overview_report = fetch_channel_overview_report(db, channel, days=days)
+                time_series = overview_report.time_series if overview_report.time_series else []
+            except Exception as e:
+                logger.warning("Error fetching YouTube Analytics for %s: %s", target_id, e)
+                scope_notice = "YouTube Analytics API data temporarily unavailable."
+        else:
+            auth_user = current_user or channel.user
+            if auth_user:
+                auth_url, _ = start_youtube_oauth(db, auth_user, include_analytics=True)
+            scope_notice = (
+                "Discovery vectors and retention curves require YouTube Analytics Reporting API permissions "
+                "(https://www.googleapis.com/auth/yt-analytics.readonly). For smaller channels or low view counts, "
+                "cohort breakdowns are subject to Google's privacy thresholds and may return no data. "
+                "YouTube Data API v3 provides aggregate channel-level telemetry only."
+            )
+
         return AnalyticsTelemetryResponse(
             channel_id=target_id,
             data_state="LIVE",
@@ -254,9 +294,12 @@ def get_channel_analytics(
             total_views=int(channel.view_count or 0),
             total_subscribers=int(channel.subscriber_count or 0),
             total_videos=int(channel.video_count or 0),
-            traffic_sources=None,
+            has_analytics_scope=has_analytics,
+            traffic_sources=traffic_sources,
             retention_chart=None,
-            scope_limitation_notice="Discovery vectors and retention curves require YouTube Analytics Reporting API permissions (https://www.googleapis.com/auth/yt-analytics.readonly). For smaller channels or low view counts, cohort breakdowns are subject to Google's privacy thresholds and may return no data. YouTube Data API v3 provides aggregate channel-level telemetry only.",
+            time_series=time_series,
+            scope_limitation_notice=scope_notice,
+            authorization_url=auth_url,
         )
 
     # Demo fallback channels (only for explicitly designated demo IDs)
@@ -285,9 +328,11 @@ def get_channel_analytics(
             total_views=1428900,
             total_subscribers=48200,
             total_videos=142,
+            has_analytics_scope=True,
             traffic_sources=demo_traffic,
             retention_chart=demo_retention,
             scope_limitation_notice=None,
+            authorization_url=None,
         )
 
     raise HTTPException(
@@ -304,6 +349,7 @@ def get_channel_analytics(
 )
 def get_channel_audience(
     channel_id: Optional[str] = Query(default=None),
+    days: int = Query(default=28, ge=1, le=365),
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> AudienceTelemetryResponse:
@@ -329,6 +375,29 @@ def get_channel_audience(
         .first()
     )
     if channel and channel.status == "connected":
+        has_analytics = has_analytics_permission(channel)
+        top_countries = None
+        scope_notice = None
+        auth_url = None
+
+        if has_analytics:
+            try:
+                geo_report = fetch_geography_report(db, channel, days=days)
+                top_countries = geo_report.top_countries if geo_report.top_countries else []
+            except Exception as e:
+                logger.warning("Error fetching YouTube geography for %s: %s", target_id, e)
+                scope_notice = "YouTube Analytics territory data temporarily unavailable."
+        else:
+            auth_user = current_user or channel.user
+            if auth_user:
+                auth_url, _ = start_youtube_oauth(db, auth_user, include_analytics=True)
+            scope_notice = (
+                "Audience demographic cohorts, viewer loyalty rates, and geographic concentration require "
+                "YouTube Analytics Partner API permissions (https://www.googleapis.com/auth/yt-analytics.readonly). "
+                "Territory and cohort data are subject to Google's strict privacy thresholds (requiring minimum view "
+                "volume per country/cohort). Data is unavailable under the standard YouTube Data API v3 read-only scope."
+            )
+
         return AudienceTelemetryResponse(
             channel_id=target_id,
             data_state="LIVE",
@@ -337,11 +406,13 @@ def get_channel_audience(
             subscribers=int(channel.subscriber_count or 0),
             total_views=int(channel.view_count or 0),
             uploads=int(channel.video_count or 0),
+            has_analytics_scope=has_analytics,
             returning_viewers_rate=None,
             subscriber_conversion_rate=None,
             optimal_release_window=None,
-            top_countries=None,
-            scope_limitation_notice="Audience demographic cohorts, viewer loyalty rates, and geographic concentration require YouTube Analytics Partner API permissions (https://www.googleapis.com/auth/yt-analytics.readonly). Territory and cohort data are subject to Google's strict privacy thresholds (requiring minimum view volume per country/cohort). Data is unavailable under the standard YouTube Data API v3 read-only scope.",
+            top_countries=top_countries,
+            scope_limitation_notice=scope_notice,
+            authorization_url=auth_url,
         )
 
     # Demo fallback channels (only for explicitly designated demo IDs)
@@ -361,11 +432,226 @@ def get_channel_audience(
             subscribers=48200,
             total_views=1428900,
             uploads=142,
+            has_analytics_scope=True,
             returning_viewers_rate="68.4%",
             subscriber_conversion_rate="3.8%",
             optimal_release_window="16:00 UTC (Wednesdays & Thursdays)",
             top_countries=demo_countries,
             scope_limitation_notice=None,
+            authorization_url=None,
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Channel '{target_id}' not found.",
+    )
+
+
+SUPPORTED_ANALYTICS_DAYS = (7, 28, 90, 365)
+
+
+def _validate_analytics_days(days: int) -> None:
+    if days not in SUPPORTED_ANALYTICS_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid days interval '{days}'. Supported intervals are: {list(SUPPORTED_ANALYTICS_DAYS)}.",
+        )
+
+
+@router.get(
+    "/analytics/overview",
+    response_model=AnalyticsOverviewReportResponse,
+    summary="Daily Analytics Overview Report",
+    description="Returns daily time-series views, watch time, and subscriber delta from YouTube Analytics API.",
+)
+def get_analytics_overview(
+    channel_id: Optional[str] = Query(default=None),
+    days: int = Query(default=28),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+) -> AnalyticsOverviewReportResponse:
+    _validate_analytics_days(days)
+    target_id = (channel_id or "demo-channel-1").strip()
+
+    if not target_id.startswith("demo-"):
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to access channel analytics reports.",
+            )
+        owned = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.channel_id == target_id, ConnectedChannel.user_id == current_user.id)
+            .first()
+        )
+        if not owned:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Channel not found or not owned by user",
+            )
+
+    channel = db.query(ConnectedChannel).filter(ConnectedChannel.channel_id == target_id).first()
+    if channel and channel.status == "connected":
+        return fetch_channel_overview_report(db=db, channel=channel, days=days)
+
+    if target_id in ("demo-channel-1", "demo-channel-2") or target_id.startswith("demo-"):
+        from app.services.youtube_analytics import calculate_date_range
+        start_date, end_date = calculate_date_range(days)
+        base_views = 48000 if target_id == "demo-channel-1" else 64000
+        points = [
+            AnalyticsDayPoint(
+                date=(datetime.now(timezone.utc).date() - timedelta(days=days - i)).isoformat(),
+                views=base_views + (i * 370) % 7500,
+                estimated_minutes_watched=(base_views + (i * 370) % 7500) * 4,
+                average_view_duration_seconds=240,
+                subscribers_gained=28 + (i % 8),
+                subscribers_lost=4 + (i % 3),
+            )
+            for i in range(days)
+        ]
+        total_v = sum(p.views for p in points)
+        total_m = sum(p.estimated_minutes_watched for p in points)
+        return AnalyticsOverviewReportResponse(
+            channel_id=target_id,
+            data_state="DEMO",
+            is_live=False,
+            has_analytics_scope=True,
+            start_date=start_date,
+            end_date=end_date,
+            days=days,
+            total_views=total_v,
+            total_estimated_minutes_watched=total_m,
+            average_view_duration_seconds=240,
+            net_subscribers=sum(p.subscribers_gained - p.subscribers_lost for p in points),
+            time_series=points,
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Channel '{target_id}' not found.",
+    )
+
+
+@router.get(
+    "/analytics/traffic-sources",
+    response_model=TrafficSourcesReportResponse,
+    summary="Traffic Sources Breakdown",
+    description="Returns inbound discovery vectors and viewer traffic categories from YouTube Analytics API.",
+)
+def get_analytics_traffic_sources(
+    channel_id: Optional[str] = Query(default=None),
+    days: int = Query(default=28),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+) -> TrafficSourcesReportResponse:
+    _validate_analytics_days(days)
+    target_id = (channel_id or "demo-channel-1").strip()
+
+    if not target_id.startswith("demo-"):
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to access channel analytics reports.",
+            )
+        owned = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.channel_id == target_id, ConnectedChannel.user_id == current_user.id)
+            .first()
+        )
+        if not owned:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Channel not found or not owned by user",
+            )
+
+    channel = db.query(ConnectedChannel).filter(ConnectedChannel.channel_id == target_id).first()
+    if channel and channel.status == "connected":
+        return fetch_traffic_sources_report(db=db, channel=channel, days=days)
+
+    if target_id in ("demo-channel-1", "demo-channel-2") or target_id.startswith("demo-"):
+        from app.services.youtube_analytics import calculate_date_range
+        start_date, end_date = calculate_date_range(days)
+        demo_traffic = [
+            TrafficSourceItem(source="YouTube Search", views=540200, percentage="37.8%", change="+14.2%"),
+            TrafficSourceItem(source="Browse Features (Homepage)", views=412900, percentage="28.9%", change="+8.6%"),
+            TrafficSourceItem(source="Suggested Videos", views=289400, percentage="20.3%", change="+22.1%"),
+            TrafficSourceItem(source="External & Socials", views=114800, percentage="8.0%", change="-2.4%"),
+            TrafficSourceItem(source="Direct / Channel URL", views=71600, percentage="5.0%", change="+1.1%"),
+        ]
+        return TrafficSourcesReportResponse(
+            channel_id=target_id,
+            data_state="DEMO",
+            is_live=False,
+            has_analytics_scope=True,
+            start_date=start_date,
+            end_date=end_date,
+            days=days,
+            total_views=1428900,
+            traffic_sources=demo_traffic,
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Channel '{target_id}' not found.",
+    )
+
+
+@router.get(
+    "/audience/geography",
+    response_model=GeographicAudienceReportResponse,
+    summary="Audience Geography Breakdown",
+    description="Returns top countries by viewer volume from YouTube Analytics API.",
+)
+def get_audience_geography(
+    channel_id: Optional[str] = Query(default=None),
+    days: int = Query(default=28),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+) -> GeographicAudienceReportResponse:
+    _validate_analytics_days(days)
+    target_id = (channel_id or "demo-channel-1").strip()
+
+    if not target_id.startswith("demo-"):
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to access channel analytics reports.",
+            )
+        owned = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.channel_id == target_id, ConnectedChannel.user_id == current_user.id)
+            .first()
+        )
+        if not owned:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Channel not found or not owned by user",
+            )
+
+    channel = db.query(ConnectedChannel).filter(ConnectedChannel.channel_id == target_id).first()
+    if channel and channel.status == "connected":
+        return fetch_geography_report(db=db, channel=channel, days=days)
+
+    if target_id in ("demo-channel-1", "demo-channel-2") or target_id.startswith("demo-"):
+        from app.services.youtube_analytics import calculate_date_range
+        start_date, end_date = calculate_date_range(days)
+        demo_countries = [
+            GeographicViewerItem(country="United States", share="44.2%", viewers="631,500"),
+            GeographicViewerItem(country="India", share="18.4%", viewers="262,900"),
+            GeographicViewerItem(country="United Kingdom", share="9.1%", viewers="130,000"),
+            GeographicViewerItem(country="Germany", share="6.5%", viewers="92,800"),
+            GeographicViewerItem(country="Canada", share="5.8%", viewers="82,800"),
+        ]
+        return GeographicAudienceReportResponse(
+            channel_id=target_id,
+            data_state="DEMO",
+            is_live=False,
+            has_analytics_scope=True,
+            start_date=start_date,
+            end_date=end_date,
+            days=days,
+            total_views=1428900,
+            top_countries=demo_countries,
         )
 
     raise HTTPException(

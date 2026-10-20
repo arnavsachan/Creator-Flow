@@ -8,6 +8,7 @@ export interface ConnectedChannel {
   videoCount: number;
   viewCount: number;
   status: 'connected' | 'disconnected' | 'expired';
+  hasAnalyticsScope?: boolean;
   connectedAt: string;
   lastSyncedAt: string;
 }
@@ -20,6 +21,7 @@ export interface ConnectionStatusResponse {
 export interface OAuthStartResponse {
   authorizationUrl: string;
   state: string;
+  includeAnalytics?: boolean;
 }
 
 export interface DisconnectResponse {
@@ -40,6 +42,60 @@ export interface RetentionPoint {
   shortForm: number;
 }
 
+export interface AnalyticsDayPoint {
+  date: string;
+  views: number;
+  estimatedMinutesWatched: number;
+  averageViewDurationSeconds: number;
+  subscribersGained: number;
+  subscribersLost: number;
+}
+
+export interface AnalyticsOverviewReportResponse {
+  channelId: string;
+  dataState: string;
+  isLive: boolean;
+  hasAnalyticsScope: boolean;
+  startDate: string;
+  endDate: string;
+  days: number;
+  totalViews: number;
+  totalEstimatedMinutesWatched: number;
+  averageViewDurationSeconds: number;
+  netSubscribers: number;
+  timeSeries: AnalyticsDayPoint[];
+  authorizationUrl?: string | null;
+  message?: string | null;
+}
+
+export interface TrafficSourcesReportResponse {
+  channelId: string;
+  dataState: string;
+  isLive: boolean;
+  hasAnalyticsScope: boolean;
+  startDate: string;
+  endDate: string;
+  days: number;
+  totalViews: number;
+  trafficSources: TrafficSourceItem[];
+  authorizationUrl?: string | null;
+  message?: string | null;
+}
+
+export interface GeographicAudienceReportResponse {
+  channelId: string;
+  dataState: string;
+  isLive: boolean;
+  hasAnalyticsScope: boolean;
+  startDate: string;
+  endDate: string;
+  days: number;
+  totalViews: number;
+  topCountries: GeographicViewerItem[];
+  authorizationUrl?: string | null;
+  message?: string | null;
+}
+
 export interface AnalyticsTelemetryResponse {
   channelId: string;
   dataState: string;
@@ -48,9 +104,12 @@ export interface AnalyticsTelemetryResponse {
   totalViews: number;
   totalSubscribers: number;
   totalVideos: number;
+  hasAnalyticsScope?: boolean;
   trafficSources?: TrafficSourceItem[] | null;
   retentionChart?: RetentionPoint[] | null;
+  timeSeries?: AnalyticsDayPoint[] | null;
   scopeLimitationNotice?: string | null;
+  authorizationUrl?: string | null;
 }
 
 export interface GeographicViewerItem {
@@ -67,11 +126,13 @@ export interface AudienceTelemetryResponse {
   subscribers: number;
   totalViews: number;
   uploads: number;
+  hasAnalyticsScope?: boolean;
   returningViewersRate?: string | null;
   subscriberConversionRate?: string | null;
   optimalReleaseWindow?: string | null;
   topCountries?: GeographicViewerItem[] | null;
   scopeLimitationNotice?: string | null;
+  authorizationUrl?: string | null;
 }
 
 export interface ChannelSnapshotItem {
