@@ -18,9 +18,11 @@ from app.schemas.shorts import (
 )
 from app.services.media import (
     ALLOWED_EXTENSIONS,
+    ASPECT_RATIOS,
     MediaValidationError,
     generate_clip,
     probe_media,
+    safe_delete_storage_file,
     safe_resolve_storage_file,
 )
 
@@ -223,6 +225,13 @@ def process_clip_task(clip_id: str, job_id: str, settings: Settings) -> None:
             ffmpeg_bin=settings.FFMPEG_BIN,
         )
 
+        # Verify clip still exists in DB (was not deleted while ffmpeg was running)
+        clip = db.get(ShortsClip, clip_id)
+        if not clip:
+            if output_path:
+                output_path.unlink(missing_ok=True)
+            return
+
         clip.status = "done"
         clip.finished_at = datetime.now(timezone.utc)
         clip.error_code = None
@@ -230,6 +239,7 @@ def process_clip_task(clip_id: str, job_id: str, settings: Settings) -> None:
     except Exception as exc:
         logger.error("FFmpeg background clipping failed: %s", type(exc).__name__)
         try:
+            clip = db.get(ShortsClip, clip_id)
             if clip:
                 clip.status = "failed"
                 clip.error_code = "PROCESSING_FAILED"
@@ -254,6 +264,10 @@ def create_clip(
     job = db.get(ShortsJob, job_id)
     if not job:
         raise MediaValidationError("JOB_NOT_FOUND")
+
+    # Validate aspect ratio
+    if req.aspect not in ASPECT_RATIOS:
+        raise MediaValidationError("INVALID_ASPECT")
 
     # Validate clip range
     if req.start_seconds < 0 or req.start_seconds >= req.end_seconds or req.end_seconds > job.duration_seconds:
@@ -300,6 +314,32 @@ def get_clip(job_id: str, clip_id: str, db: Session) -> ShortsClip:
     return clip
 
 
+def delete_clip(job_id: str, clip_id: str, db: Session, storage_dir: Path) -> None:
+    """
+    Deletes a single clip DB row and its storage file.
+    - 404 CLIP_NOT_FOUND if clip does not exist OR belongs to another job.
+    - 409 CLIP_BUSY if clip is queued or processing.
+    - Resolves path from DB record only, verifies it stays within storage_dir,
+      and ignores a missing file. Never deletes anything outside storage.
+    """
+    stmt = select(ShortsClip).where(ShortsClip.id == clip_id, ShortsClip.job_id == job_id)
+    clip = db.scalar(stmt)
+    if not clip:
+        raise MediaValidationError("CLIP_NOT_FOUND")
+
+    # If clip is marked processing but task died across server restart, mark it failed first
+    _check_interrupted_clip(clip, db)
+
+    if clip.status in ("queued", "processing") or clip.id in _ACTIVE_TASKS:
+        raise MediaValidationError("CLIP_BUSY")
+
+    if clip.output_path:
+        safe_delete_storage_file(clip.output_path, storage_dir)
+
+    db.delete(clip)
+    db.commit()
+
+
 def delete_job(job_id: str, db: Session, storage_dir: Path) -> None:
     """
     Removes database rows and all associated storage files.
@@ -312,25 +352,12 @@ def delete_job(job_id: str, db: Session, storage_dir: Path) -> None:
     # Delete clip files
     for clip in job.clips or []:
         if clip.output_path:
-            try:
-                safe_path = safe_resolve_storage_file(clip.output_path, storage_dir)
-                safe_path.unlink(missing_ok=True)
-            except Exception:
-                try:
-                    Path(clip.output_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+            safe_delete_storage_file(clip.output_path, storage_dir)
 
     # Delete source video file
     if job.stored_path:
-        try:
-            safe_path = safe_resolve_storage_file(job.stored_path, storage_dir)
-            safe_path.unlink(missing_ok=True)
-        except Exception:
-            try:
-                Path(job.stored_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+        safe_delete_storage_file(job.stored_path, storage_dir)
 
     db.delete(job)
     db.commit()
+

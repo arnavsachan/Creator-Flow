@@ -28,6 +28,7 @@ from app.services.media import MediaValidationError, safe_resolve_storage_file
 from app.services.shorts import (
     clip_to_data,
     create_clip,
+    delete_clip,
     delete_job,
     get_clip,
     get_job,
@@ -58,12 +59,14 @@ def _handle_media_error(err: MediaValidationError) -> HTTPException:
         "FEATURE_DISABLED": status.HTTP_503_SERVICE_UNAVAILABLE,
         "JOB_NOT_FOUND": status.HTTP_404_NOT_FOUND,
         "CLIP_NOT_FOUND": status.HTTP_404_NOT_FOUND,
+        "CLIP_BUSY": status.HTTP_409_CONFLICT,
         "FILE_NOT_FOUND": status.HTTP_404_NOT_FOUND,
         "FORBIDDEN_PATH": status.HTTP_404_NOT_FOUND,
         "PROCESSING_FAILED": status.HTTP_500_INTERNAL_SERVER_ERROR,
         "FILE_TOO_LARGE": status.HTTP_400_BAD_REQUEST,
         "UNSUPPORTED_FORMAT": status.HTTP_400_BAD_REQUEST,
         "INVALID_MEDIA": status.HTTP_400_BAD_REQUEST,
+        "INVALID_ASPECT": status.HTTP_400_BAD_REQUEST,
         "DURATION_EXCEEDED": status.HTTP_400_BAD_REQUEST,
         "INVALID_RANGE": status.HTTP_400_BAD_REQUEST,
     }
@@ -255,3 +258,26 @@ def delete_job_endpoint(
         )
     except MediaValidationError as err:
         raise _handle_media_error(err) from err
+
+
+@router.delete(
+    "/jobs/{id}/clips/{clip_id}",
+    response_model=ShortsDeleteResponse,
+    summary="Delete a Single Generated Clip",
+)
+def delete_clip_endpoint(
+    id: str,
+    clip_id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ShortsDeleteResponse:
+    try:
+        delete_clip(job_id=id, clip_id=clip_id, db=db, storage_dir=settings.SHORTS_STORAGE_DIR)
+        return ShortsDeleteResponse(
+            data_state="LIVE",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            message="Clip deleted successfully.",
+        )
+    except MediaValidationError as err:
+        raise _handle_media_error(err) from err
+

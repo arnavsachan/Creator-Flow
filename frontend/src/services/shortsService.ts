@@ -17,6 +17,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   JOB_NOT_FOUND: 'Video job not found.',
   CLIP_NOT_FOUND: 'Clip not found.',
   PROCESSING_FAILED: 'Video trimming failed. Please try again.',
+  CLIP_BUSY: 'Wait until this clip finishes processing before deleting.',
+  INVALID_ASPECT: 'Invalid output aspect ratio selected.',
   FEATURE_DISABLED: 'Shorts Clipper is disabled in this environment.',
 };
 
@@ -124,3 +126,12 @@ export async function getClip(
 export async function deleteJob(jobId: string, signal?: AbortSignal): Promise<void> {
   await apiClient.delete(`/shorts/jobs/${jobId}`, { signal });
 }
+
+export async function deleteClip(
+  jobId: string,
+  clipId: string,
+  signal?: AbortSignal
+): Promise<void> {
+  await apiClient.delete(`/shorts/jobs/${jobId}/clips/${clipId}`, { signal });
+}
+

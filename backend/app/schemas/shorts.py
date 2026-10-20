@@ -8,7 +8,7 @@ from app.schemas.dashboard import CamelModel, DataState
 class CreateClipRequest(BaseModel):
     start_seconds: float = Field(..., ge=0, description="Start timestamp of clip in seconds")
     end_seconds: float = Field(..., gt=0, description="End timestamp of clip in seconds")
-    aspect: Literal["original", "vertical_9_16"] = Field(
+    aspect: str = Field(
         default="original",
         description="Aspect ratio for output clip",
     )

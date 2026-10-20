@@ -405,3 +405,245 @@ def test_shorts_storage_dir_absolute_path(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SHORTS_STORAGE_DIR", str(abs_path))
     settings = Settings()
     assert settings.SHORTS_STORAGE_DIR == abs_path
+
+
+@pytest.mark.parametrize(
+    "aspect_key,expected_width,expected_height",
+    [
+        ("original", 320, 240),
+        ("vertical_9_16", 1080, 1920),
+        ("square_1_1", 1080, 1080),
+        ("portrait_4_5", 1080, 1350),
+        ("landscape_16_9", 1920, 1080),
+    ],
+)
+def test_all_five_aspect_ratios_produce_expected_dimensions(
+    client: TestClient,
+    sample_video_path: Path,
+    aspect_key: str,
+    expected_width: int,
+    expected_height: int,
+):
+    """
+    Verify that each of the 5 aspect ratios produces the expected dimensions via ffprobe.
+    """
+    if not ffmpeg_available:
+        pytest.skip("FFmpeg not installed on host")
+
+    with open(sample_video_path, "rb") as f:
+        upload_res = client.post("/api/v1/shorts/jobs", files={"file": ("sample.mp4", f, "video/mp4")})
+    job_id = upload_res.json()["data"]["id"]
+
+    clip_payload = {
+        "start_seconds": 0.0,
+        "end_seconds": 1.0,
+        "aspect": aspect_key,
+    }
+    clip_res = client.post(f"/api/v1/shorts/jobs/{job_id}/clips", json=clip_payload)
+    assert clip_res.status_code == 202
+    clip_id = clip_res.json()["data"]["id"]
+
+    db = TestingSessionLocal()
+    clip = db.get(ShortsClip, clip_id)
+    assert clip is not None
+    assert clip.status == "done"
+    assert clip.output_path is not None
+
+    media_info = probe_media(Path(clip.output_path))
+    db.close()
+
+    assert media_info.width == expected_width
+    assert media_info.height == expected_height
+
+
+def test_invalid_aspect_rejected_with_invalid_aspect_code(client: TestClient, sample_video_path: Path):
+    """
+    Creating a clip with unknown aspect value returns 400 with INVALID_ASPECT error code.
+    """
+    with open(sample_video_path, "rb") as f:
+        upload_res = client.post("/api/v1/shorts/jobs", files={"file": ("sample.mp4", f, "video/mp4")})
+    job_id = upload_res.json()["data"]["id"]
+
+    clip_payload = {
+        "start_seconds": 0.0,
+        "end_seconds": 1.0,
+        "aspect": "cinematic_21_9_unsupported",
+    }
+    clip_res = client.post(f"/api/v1/shorts/jobs/{job_id}/clips", json=clip_payload)
+    assert clip_res.status_code == 400
+    assert clip_res.json()["detail"] == "INVALID_ASPECT"
+
+
+def test_delete_clip_removes_row_and_file(client: TestClient, sample_video_path: Path):
+    """
+    DELETE /jobs/{job_id}/clips/{clip_id} removes database row and disk file.
+    """
+    with open(sample_video_path, "rb") as f:
+        upload_res = client.post("/api/v1/shorts/jobs", files={"file": ("sample.mp4", f, "video/mp4")})
+    job_id = upload_res.json()["data"]["id"]
+
+    clip_payload = {"start_seconds": 0.0, "end_seconds": 1.0, "aspect": "original"}
+    clip_res = client.post(f"/api/v1/shorts/jobs/{job_id}/clips", json=clip_payload)
+    assert clip_res.status_code == 202
+    clip_id = clip_res.json()["data"]["id"]
+
+    db = TestingSessionLocal()
+    clip = db.get(ShortsClip, clip_id)
+    assert clip is not None
+    assert clip.output_path is not None
+    output_path = Path(clip.output_path)
+    assert output_path.exists()
+    db.close()
+
+    # Delete clip
+    del_res = client.delete(f"/api/v1/shorts/jobs/{job_id}/clips/{clip_id}")
+    assert del_res.status_code == 200
+    assert del_res.json()["message"] == "Clip deleted successfully."
+
+    # Verify DB row is removed
+    db = TestingSessionLocal()
+    assert db.get(ShortsClip, clip_id) is None
+    db.close()
+
+    # Verify output file is removed
+    assert not output_path.exists()
+
+
+def test_delete_clip_wrong_job_returns_404(client: TestClient, sample_video_path: Path):
+    """
+    Deleting a clip with another job's ID returns 404 CLIP_NOT_FOUND.
+    """
+    with open(sample_video_path, "rb") as f:
+        upload_res = client.post("/api/v1/shorts/jobs", files={"file": ("sample.mp4", f, "video/mp4")})
+    job1_id = upload_res.json()["data"]["id"]
+
+    clip_payload = {"start_seconds": 0.0, "end_seconds": 1.0, "aspect": "original"}
+    clip_res = client.post(f"/api/v1/shorts/jobs/{job1_id}/clips", json=clip_payload)
+    clip_id = clip_res.json()["data"]["id"]
+
+    wrong_job_id = str(uuid.uuid4())
+    del_res = client.delete(f"/api/v1/shorts/jobs/{wrong_job_id}/clips/{clip_id}")
+    assert del_res.status_code == 404
+    assert del_res.json()["detail"] == "CLIP_NOT_FOUND"
+
+
+def test_delete_missing_clip_returns_404(client: TestClient, sample_video_path: Path):
+    """
+    Deleting non-existent clip returns 404 CLIP_NOT_FOUND.
+    """
+    with open(sample_video_path, "rb") as f:
+        upload_res = client.post("/api/v1/shorts/jobs", files={"file": ("sample.mp4", f, "video/mp4")})
+    job_id = upload_res.json()["data"]["id"]
+
+    missing_clip_id = str(uuid.uuid4())
+    del_res = client.delete(f"/api/v1/shorts/jobs/{job_id}/clips/{missing_clip_id}")
+    assert del_res.status_code == 404
+    assert del_res.json()["detail"] == "CLIP_NOT_FOUND"
+
+
+def test_delete_processing_or_queued_clip_returns_409_clip_busy(client: TestClient):
+    """
+    Deleting clip while queued or processing returns 409 CLIP_BUSY.
+    """
+    db = TestingSessionLocal()
+    job = ShortsJob(
+        id=str(uuid.uuid4()),
+        original_filename="busy_test.mp4",
+        stored_path="dummy.mp4",
+        size_bytes=1000,
+        duration_seconds=10.0,
+        width=1920,
+        height=1080,
+        status="uploaded",
+    )
+    db.add(job)
+    db.commit()
+
+    clip = ShortsClip(
+        id=str(uuid.uuid4()),
+        job_id=job.id,
+        start_seconds=1.0,
+        end_seconds=3.0,
+        aspect="original",
+        status="processing",
+    )
+    db.add(clip)
+    db.commit()
+
+    # Mark active in memory
+    _ACTIVE_TASKS.add(clip.id)
+    clip_id = clip.id
+    job_id = job.id
+    db.close()
+
+    del_res = client.delete(f"/api/v1/shorts/jobs/{job_id}/clips/{clip_id}")
+    assert del_res.status_code == 409
+    assert del_res.json()["detail"] == "CLIP_BUSY"
+
+    _ACTIVE_TASKS.discard(clip_id)
+
+
+def test_deleting_clip_twice_returns_404_the_second_time(client: TestClient, sample_video_path: Path):
+    """
+    Deleting a clip twice returns 200 on first call and 404 on second call.
+    """
+    with open(sample_video_path, "rb") as f:
+        upload_res = client.post("/api/v1/shorts/jobs", files={"file": ("sample.mp4", f, "video/mp4")})
+    job_id = upload_res.json()["data"]["id"]
+
+    clip_payload = {"start_seconds": 0.0, "end_seconds": 1.0, "aspect": "original"}
+    clip_res = client.post(f"/api/v1/shorts/jobs/{job_id}/clips", json=clip_payload)
+    clip_id = clip_res.json()["data"]["id"]
+
+    del_res1 = client.delete(f"/api/v1/shorts/jobs/{job_id}/clips/{clip_id}")
+    assert del_res1.status_code == 200
+
+    del_res2 = client.delete(f"/api/v1/shorts/jobs/{job_id}/clips/{clip_id}")
+    assert del_res2.status_code == 404
+    assert del_res2.json()["detail"] == "CLIP_NOT_FOUND"
+
+
+def test_delete_clip_path_traversal_impossible(client: TestClient, tmp_path: Path):
+    """
+    If a clip record somehow has an output_path outside storage directory,
+    delete_clip safely prevents outside deletion and still deletes DB row.
+    """
+    outside_file = tmp_path / "sensitive_outside_file.txt"
+    outside_file.write_text("critical data")
+
+    db = TestingSessionLocal()
+    job = ShortsJob(
+        id=str(uuid.uuid4()),
+        original_filename="traversal_test.mp4",
+        stored_path="dummy.mp4",
+        size_bytes=1000,
+        duration_seconds=10.0,
+        width=1920,
+        height=1080,
+        status="uploaded",
+    )
+    db.add(job)
+    db.commit()
+
+    clip = ShortsClip(
+        id=str(uuid.uuid4()),
+        job_id=job.id,
+        start_seconds=1.0,
+        end_seconds=3.0,
+        aspect="original",
+        status="done",
+        output_path=str(outside_file),
+    )
+    db.add(clip)
+    db.commit()
+    clip_id = clip.id
+    job_id = job.id
+    db.close()
+
+    del_res = client.delete(f"/api/v1/shorts/jobs/{job_id}/clips/{clip_id}")
+    assert del_res.status_code == 200
+
+    # Outside file MUST NOT be deleted
+    assert outside_file.exists()
+    assert outside_file.read_text() == "critical data"
+

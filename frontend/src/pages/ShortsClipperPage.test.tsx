@@ -10,6 +10,7 @@ vi.mock('../services/shortsService', () => ({
   createClip: vi.fn(),
   getClip: vi.fn(),
   deleteJob: vi.fn(),
+  deleteClip: vi.fn(),
   getSourcePreviewUrl: vi.fn((id: string) => `/mock-api/shorts/jobs/${id}/source`),
   getClipDownloadUrl: vi.fn((jobId: string, clipId: string) => `/mock-api/shorts/jobs/${jobId}/clips/${clipId}/download`),
   getFriendlyErrorMessage: vi.fn((err: any) => err?.message || 'An unexpected error occurred.'),
@@ -17,6 +18,8 @@ vi.mock('../services/shortsService', () => ({
 
 const mockListJobs = vi.mocked(shortsService.listJobs);
 const mockUploadJob = vi.mocked(shortsService.uploadJob);
+const mockCreateClip = vi.mocked(shortsService.createClip);
+const mockDeleteClip = vi.mocked(shortsService.deleteClip);
 
 describe('ShortsClipperPage Frontend Tests', () => {
   beforeEach(() => {
@@ -418,5 +421,265 @@ describe('ShortsClipperPage Frontend Tests', () => {
     expect(screen.getByText('FFMPEG_TIMEOUT')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Download clip clip-don/i })).toBeInTheDocument();
   });
+
+  it('aspect control shows 5 options and sends the chosen key to createClip', async () => {
+    const job: ShortsJob = {
+      id: 'job-aspects',
+      ownerId: null,
+      originalFilename: 'aspects.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [],
+    };
+
+    mockListJobs.mockResolvedValueOnce([job]);
+    mockCreateClip.mockResolvedValueOnce({
+      id: 'clip-sq',
+      jobId: 'job-aspects',
+      startSeconds: 0,
+      endSeconds: 15,
+      aspect: 'square_1_1',
+      status: 'queued',
+      errorCode: null,
+      createdAt: '2026-10-19T10:01:00Z',
+      finishedAt: null,
+    });
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('9:16 Vertical')).toBeInTheDocument();
+      expect(screen.getByText('1:1 Square')).toBeInTheDocument();
+      expect(screen.getByText('4:5 Portrait')).toBeInTheDocument();
+      expect(screen.getByText('16:9 Landscape')).toBeInTheDocument();
+      expect(screen.getByText('Original')).toBeInTheDocument();
+    });
+
+    // Select 1:1 Square
+    fireEvent.click(screen.getByText('1:1 Square'));
+
+    // Click Generate Clip
+    const generateBtn = screen.getByRole('button', { name: /Generate Clip/i });
+    fireEvent.click(generateBtn);
+
+    await waitFor(() => {
+      expect(mockCreateClip).toHaveBeenCalledWith(
+        'job-aspects',
+        expect.objectContaining({
+          aspect: 'square_1_1',
+        })
+      );
+    });
+  });
+
+  it('3-dot menu opens and closes via Escape and outside click', async () => {
+    const job: ShortsJob = {
+      id: 'job-menu-test',
+      ownerId: null,
+      originalFilename: 'menu-test.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [
+        {
+          id: 'clip-menu-1',
+          jobId: 'job-menu-test',
+          startSeconds: 0,
+          endSeconds: 10,
+          aspect: 'vertical_9_16',
+          status: 'done',
+          errorCode: null,
+          createdAt: '2026-10-19T10:01:00Z',
+          finishedAt: '2026-10-19T10:02:00Z',
+        },
+      ],
+    };
+
+    mockListJobs.mockResolvedValueOnce([job]);
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Options for clip clip-men/i)).toBeInTheDocument();
+    });
+
+    const menuTrigger = screen.getByLabelText(/Options for clip clip-men/i);
+
+    // Click trigger to open menu
+    fireEvent.click(menuTrigger);
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /Delete clip/i })).toBeInTheDocument();
+
+    // Escape closes menu
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+
+    // Open again, outside pointerdown closes menu
+    fireEvent.click(menuTrigger);
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('delete confirm flow calls deleteClip, removes card, and updates job clip count', async () => {
+    const job: ShortsJob = {
+      id: 'job-del-test',
+      ownerId: null,
+      originalFilename: 'delete-flow.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [
+        {
+          id: 'clip-alpha',
+          jobId: 'job-del-test',
+          startSeconds: 0,
+          endSeconds: 10,
+          aspect: 'square_1_1',
+          status: 'done',
+          errorCode: null,
+          createdAt: '2026-10-19T10:01:00Z',
+          finishedAt: '2026-10-19T10:02:00Z',
+        },
+        {
+          id: 'clip-beta',
+          jobId: 'job-del-test',
+          startSeconds: 10,
+          endSeconds: 20,
+          aspect: 'vertical_9_16',
+          status: 'done',
+          errorCode: null,
+          createdAt: '2026-10-19T10:03:00Z',
+          finishedAt: '2026-10-19T10:04:00Z',
+        },
+      ],
+    };
+
+    mockListJobs.mockResolvedValue([job]);
+    mockDeleteClip.mockResolvedValueOnce(undefined);
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('2 clips')).toBeInTheDocument();
+    });
+
+    const menuTrigger = screen.getByLabelText(/Options for clip clip-alp/i);
+    fireEvent.click(menuTrigger);
+
+    const deleteMenuItem = screen.getByRole('menuitem', { name: /Delete clip/i });
+    fireEvent.click(deleteMenuItem);
+
+    // Shows confirmation prompt
+    expect(screen.getByText('Delete this clip?')).toBeInTheDocument();
+
+    // Click Confirm
+    const confirmBtn = screen.getByRole('button', { name: 'Confirm' });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockDeleteClip).toHaveBeenCalledWith('job-del-test', 'clip-alpha');
+      expect(screen.queryByLabelText(/Options for clip clip-alp/i)).not.toBeInTheDocument();
+      // Clip count in JobsList updates to "1 clip"
+      expect(screen.getByText('1 clip')).toBeInTheDocument();
+    });
+  });
+
+  it('displays friendly message on delete failure and disables delete for processing clips', async () => {
+    const job: ShortsJob = {
+      id: 'job-busy-test',
+      ownerId: null,
+      originalFilename: 'busy.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [
+        {
+          id: 'clip-proc-id',
+          jobId: 'job-busy-test',
+          startSeconds: 0,
+          endSeconds: 10,
+          aspect: 'portrait_4_5',
+          status: 'processing',
+          errorCode: null,
+          createdAt: '2026-10-19T10:01:00Z',
+          finishedAt: null,
+        },
+        {
+          id: 'clip-err-id',
+          jobId: 'job-busy-test',
+          startSeconds: 10,
+          endSeconds: 20,
+          aspect: 'landscape_16_9',
+          status: 'done',
+          errorCode: null,
+          createdAt: '2026-10-19T10:02:00Z',
+          finishedAt: '2026-10-19T10:03:00Z',
+        },
+      ],
+    };
+
+    mockListJobs.mockResolvedValue([job]);
+    mockDeleteClip.mockRejectedValueOnce({
+      code: 'CLIP_BUSY',
+      message: 'Wait until this clip finishes processing before deleting.',
+    });
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Options for clip clip-pro/i)).toBeInTheDocument();
+    });
+
+    // 1. Processing clip has Delete disabled with tooltip
+    const procTrigger = screen.getByLabelText(/Options for clip clip-pro/i);
+    fireEvent.click(procTrigger);
+
+    const procDeleteBtn = screen.getByRole('menuitem', { name: /Delete clip/i });
+    expect(procDeleteBtn).toBeDisabled();
+    expect(procDeleteBtn).toHaveAttribute(
+      'title',
+      'Cannot delete clip while it is queued or processing'
+    );
+
+    // Close menu
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    // 2. Done clip that fails on delete with CLIP_BUSY shows friendly message
+    const errTrigger = screen.getByLabelText(/Options for clip clip-err/i);
+    fireEvent.click(errTrigger);
+
+    const errDeleteBtn = screen.getByRole('menuitem', { name: /Delete clip/i });
+    fireEvent.click(errDeleteBtn);
+
+    const confirmBtn = screen.getByRole('button', { name: 'Confirm' });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Wait until this clip finishes processing before deleting.')
+      ).toBeInTheDocument();
+    });
+  });
 });
+
+
 

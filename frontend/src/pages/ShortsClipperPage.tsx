@@ -11,6 +11,7 @@ import { JobsList } from '../components/shorts/JobsList';
 import { ClipsGallery } from '../components/shorts/ClipsGallery';
 import {
   createClip,
+  deleteClip,
   deleteJob,
   getFriendlyErrorMessage,
   listJobs,
@@ -254,6 +255,15 @@ export const ShortsClipperPage: React.FC = () => {
     }
   };
 
+  const handleDeleteClip = async (jobId: string, clipId: string) => {
+    await deleteClip(jobId, clipId);
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.id === jobId ? { ...j, clips: j.clips.filter((c) => c.id !== clipId) } : j
+      )
+    );
+  };
+
   const handleSeekVideo = (time: number) => {
     if (videoRef.current) {
       videoRef.current.currentTime = time;
@@ -410,6 +420,7 @@ export const ShortsClipperPage: React.FC = () => {
           jobId={activeJob.id}
           jobFilename={activeJob.originalFilename}
           clips={activeJob.clips}
+          onDeleteClip={(clipId) => handleDeleteClip(activeJob.id, clipId)}
         />
       )}
     </div>

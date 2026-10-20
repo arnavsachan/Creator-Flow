@@ -3,10 +3,21 @@ import json
 import logging
 from pathlib import Path
 import subprocess
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
+# Single mapping of aspect keys to target output dimensions (width, height)
+# None indicates original dimensions (no crop)
+ASPECT_RATIOS: dict[str, Optional[tuple[int, int]]] = {
+    "original": None,
+    "vertical_9_16": (1080, 1920),
+    "square_1_1": (1080, 1080),
+    "portrait_4_5": (1080, 1350),
+    "landscape_16_9": (1920, 1080),
+}
 
 
 class MediaValidationError(Exception):
@@ -144,10 +155,15 @@ def generate_clip(
         "-map", "0:a?",
     ]
 
-    if aspect == "vertical_9_16":
+    if aspect not in ASPECT_RATIOS:
+        raise MediaValidationError("INVALID_ASPECT")
+
+    target_dims = ASPECT_RATIOS[aspect]
+    if target_dims is not None:
+        target_w, target_h = target_dims
         cmd.extend([
             "-vf",
-            "crop=min(iw\\,ih*9/16):min(ih\\,iw*16/9):(iw-ow)/2:(ih-oh)/2,scale=1080:1920",
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}:(iw-ow)/2:(ih-oh)/2",
         ])
 
     cmd.extend([
@@ -202,3 +218,29 @@ def safe_resolve_storage_file(stored_path_str: str, storage_dir: Path) -> Path:
         raise MediaValidationError("JOB_NOT_FOUND")
 
     return target_path
+
+
+def safe_delete_storage_file(stored_path_str: Optional[str], storage_dir: Path) -> None:
+    """
+    Safely deletes a file strictly inside storage_dir.
+    Resolves the path from stored_path_str, verifies it stays within storage_dir,
+    and ignores a missing file. Never deletes anything outside storage_dir.
+    """
+    if not stored_path_str:
+        return
+    storage_root = storage_dir.resolve()
+    target_path = Path(stored_path_str).resolve()
+    try:
+        target_path.relative_to(storage_root)
+    except ValueError:
+        logger.warning(
+            "Prevented deletion attempt outside storage directory: %s outside %s",
+            stored_path_str,
+            storage_root,
+        )
+        return
+    try:
+        target_path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("Failed to delete storage file %s: %s", target_path, type(exc).__name__)
+

@@ -1,6 +1,11 @@
 import type { EnvelopeResponse } from './dataStates';
 
-export type AspectRatio = 'original' | 'vertical_9_16';
+export type AspectRatio =
+  | 'original'
+  | 'vertical_9_16'
+  | 'square_1_1'
+  | 'portrait_4_5'
+  | 'landscape_16_9';
 export type JobStatus = 'uploaded' | 'failed';
 export type ClipStatus = 'queued' | 'processing' | 'done' | 'failed';
 
