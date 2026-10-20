@@ -33,6 +33,9 @@ from app.schemas.youtube import (
 )
 from app.services.dashboard import format_relative_time
 from app.services.youtube_analytics import (
+    RETURNING_VIEWERS_NOT_SUPPORTED_NOTICE,
+    calculate_optimal_release_window,
+    calculate_subscriber_conversion,
     fetch_channel_overview_report,
     fetch_geography_report,
     fetch_traffic_sources_report,
@@ -265,16 +268,38 @@ def get_channel_analytics(
         time_series = None
         scope_notice = None
         auth_url = None
+        analytics_verified = False
+        analytics_error = None
 
         if has_analytics:
             try:
                 traffic_report = fetch_traffic_sources_report(db, channel, days=days)
-                traffic_sources = traffic_report.traffic_sources if traffic_report.traffic_sources else []
                 overview_report = fetch_channel_overview_report(db, channel, days=days)
-                time_series = overview_report.time_series if overview_report.time_series else []
+
+                if traffic_report.data_state == "SERVICE_DISABLED" or overview_report.data_state == "SERVICE_DISABLED":
+                    analytics_error = "SERVICE_DISABLED"
+                    scope_notice = (
+                        "YouTube Analytics API is not enabled in your Google Cloud Project (198142014140). "
+                        "Please visit https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140 "
+                        "to enable it, then retry."
+                    )
+                elif traffic_report.data_state == "AUTHORIZATION_REQUIRED" or overview_report.data_state == "AUTHORIZATION_REQUIRED":
+                    has_analytics = False
+                    auth_user = current_user or channel.user
+                    if auth_user:
+                        auth_url, _ = start_youtube_oauth(db, auth_user, include_analytics=True)
+                    scope_notice = (
+                        "Discovery vectors and retention curves require YouTube Analytics Reporting API permissions "
+                        "(https://www.googleapis.com/auth/yt-analytics.readonly)."
+                    )
+                else:
+                    traffic_sources = traffic_report.traffic_sources if traffic_report.traffic_sources is not None else []
+                    time_series = overview_report.time_series if overview_report.time_series is not None else []
+                    analytics_verified = True
             except Exception as e:
                 logger.warning("Error fetching YouTube Analytics for %s: %s", target_id, e)
-                scope_notice = "YouTube Analytics API data temporarily unavailable."
+                analytics_error = "UPSTREAM_ERROR"
+                scope_notice = "YouTube Analytics API service temporarily unavailable."
         else:
             auth_user = current_user or channel.user
             if auth_user:
@@ -295,9 +320,12 @@ def get_channel_analytics(
             total_subscribers=int(channel.subscriber_count or 0),
             total_videos=int(channel.video_count or 0),
             has_analytics_scope=has_analytics,
+            analytics_verified=analytics_verified,
+            analytics_error=analytics_error,
             traffic_sources=traffic_sources,
             retention_chart=None,
             time_series=time_series,
+            scope_notice=scope_notice,
             scope_limitation_notice=scope_notice,
             authorization_url=auth_url,
         )
@@ -329,6 +357,8 @@ def get_channel_analytics(
             total_subscribers=48200,
             total_videos=142,
             has_analytics_scope=True,
+            analytics_verified=True,
+            analytics_error=None,
             traffic_sources=demo_traffic,
             retention_chart=demo_retention,
             scope_limitation_notice=None,
@@ -379,14 +409,86 @@ def get_channel_audience(
         top_countries = None
         scope_notice = None
         auth_url = None
+        analytics_verified = False
+        analytics_error = None
+
+        # 1. Returning Viewers: Studio-only metric (not exposed in public YouTube Analytics API)
+        returning_rate = None
+        returning_state = "UNSUPPORTED_METRIC"
+        returning_notice = RETURNING_VIEWERS_NOT_SUPPORTED_NOTICE
+
+        # 2. Optimal Release Window: Derived from video upload history
+        optimal_window, optimal_state, optimal_notice = calculate_optimal_release_window(
+            db, channel.channel_id, int(channel.video_count or 0)
+        )
+
+        # 3. Subscriber Conversion: Computed from YouTube Analytics Overview report
+        conversion_rate = None
+        conversion_state = "AUTHORIZATION_REQUIRED" if not has_analytics else "NO_DATA"
+        conversion_notice = (
+            "Requires YouTube Analytics API permissions"
+            if not has_analytics
+            else f"0 views in {days}d lookback window (conversion rate requires views)"
+        )
 
         if has_analytics:
             try:
                 geo_report = fetch_geography_report(db, channel, days=days)
-                top_countries = geo_report.top_countries if geo_report.top_countries else []
+                overview_report = fetch_channel_overview_report(db, channel, days=days)
+
+                if geo_report.data_state == "SERVICE_DISABLED" or overview_report.data_state == "SERVICE_DISABLED":
+                    analytics_error = "SERVICE_DISABLED"
+                    scope_notice = (
+                        "YouTube Analytics API is not enabled in your Google Cloud Project (198142014140). "
+                        "Please visit https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140 "
+                        "to enable it, then retry."
+                    )
+                    returning_state = "SERVICE_DISABLED"
+                    returning_notice = "Enable YouTube Analytics API in Google Cloud"
+                    conversion_rate = None
+                    conversion_state = "SERVICE_DISABLED"
+                    conversion_notice = "Enable YouTube Analytics API in Google Cloud"
+                    optimal_state = "SERVICE_DISABLED"
+                    optimal_notice = "Enable YouTube Analytics API in Google Cloud"
+                elif geo_report.data_state == "AUTHORIZATION_REQUIRED" or overview_report.data_state == "AUTHORIZATION_REQUIRED":
+                    has_analytics = False
+                    auth_user = current_user or channel.user
+                    if auth_user:
+                        auth_url, _ = start_youtube_oauth(db, auth_user, include_analytics=True)
+                    scope_notice = "YouTube Analytics Reporting API permissions required."
+                    returning_state = "AUTHORIZATION_REQUIRED"
+                    returning_notice = "Requires yt-analytics.readonly scope"
+                    conversion_rate = None
+                    conversion_state = "AUTHORIZATION_REQUIRED"
+                    conversion_notice = "Requires yt-analytics.readonly scope"
+                elif overview_report.data_state == "NO_DATA":
+                    top_countries = geo_report.top_countries if geo_report.top_countries is not None else []
+                    analytics_verified = True
+                    conversion_rate, conversion_state, conversion_notice = calculate_subscriber_conversion(
+                        views=0,
+                        subscribers_gained=0,
+                        days=days,
+                    )
+                else:
+                    top_countries = geo_report.top_countries if geo_report.top_countries is not None else []
+                    analytics_verified = True
+
+                    subs_gained = getattr(overview_report, "subscribers_gained", 0)
+                    if not subs_gained and overview_report.time_series:
+                        subs_gained = sum(p.subscribers_gained for p in overview_report.time_series)
+
+                    conversion_rate, conversion_state, conversion_notice = calculate_subscriber_conversion(
+                        views=overview_report.total_views,
+                        subscribers_gained=subs_gained,
+                        days=days,
+                    )
             except Exception as e:
-                logger.warning("Error fetching YouTube geography for %s: %s", target_id, e)
-                scope_notice = "YouTube Analytics territory data temporarily unavailable."
+                logger.warning("Error fetching YouTube audience metrics for %s: %s", target_id, e)
+                analytics_error = "UPSTREAM_ERROR"
+                conversion_rate = None
+                conversion_state = "UPSTREAM_ERROR"
+                conversion_notice = "YouTube Analytics audience telemetry temporarily unavailable."
+                scope_notice = "YouTube Analytics audience telemetry temporarily unavailable."
         else:
             auth_user = current_user or channel.user
             if auth_user:
@@ -397,6 +499,15 @@ def get_channel_audience(
                 "Territory and cohort data are subject to Google's strict privacy thresholds (requiring minimum view "
                 "volume per country/cohort). Data is unavailable under the standard YouTube Data API v3 read-only scope."
             )
+            conversion_rate = None
+            conversion_state = "AUTHORIZATION_REQUIRED"
+            conversion_notice = "Requires yt-analytics.readonly scope"
+            returning_rate = None
+            returning_state = "AUTHORIZATION_REQUIRED"
+            returning_notice = "Requires yt-analytics.readonly scope"
+            optimal_window = None
+            optimal_state = "AUTHORIZATION_REQUIRED"
+            optimal_notice = "Requires yt-analytics.readonly scope"
 
         return AudienceTelemetryResponse(
             channel_id=target_id,
@@ -406,11 +517,21 @@ def get_channel_audience(
             subscribers=int(channel.subscriber_count or 0),
             total_views=int(channel.view_count or 0),
             uploads=int(channel.video_count or 0),
+            days=days,
             has_analytics_scope=has_analytics,
-            returning_viewers_rate=None,
-            subscriber_conversion_rate=None,
-            optimal_release_window=None,
+            analytics_verified=analytics_verified,
+            analytics_error=analytics_error,
+            returning_viewers_rate=returning_rate,
+            returning_viewers_state=returning_state,
+            returning_viewers_notice=returning_notice,
+            subscriber_conversion_rate=conversion_rate,
+            subscriber_conversion_state=conversion_state,
+            subscriber_conversion_notice=conversion_notice,
+            optimal_release_window=optimal_window,
+            optimal_release_window_state=optimal_state,
+            optimal_release_window_notice=optimal_notice,
             top_countries=top_countries,
+            scope_notice=scope_notice,
             scope_limitation_notice=scope_notice,
             authorization_url=auth_url,
         )
@@ -432,10 +553,19 @@ def get_channel_audience(
             subscribers=48200,
             total_views=1428900,
             uploads=142,
+            days=days,
             has_analytics_scope=True,
+            analytics_verified=True,
+            analytics_error=None,
             returning_viewers_rate="68.4%",
+            returning_viewers_state="LIVE",
+            returning_viewers_notice="+4.1% loyalty increase (sample benchmark)",
             subscriber_conversion_rate="3.8%",
+            subscriber_conversion_state="LIVE",
+            subscriber_conversion_notice="Top 10% in Tech niche (sample benchmark)",
             optimal_release_window="16:00 UTC (Wednesdays & Thursdays)",
+            optimal_release_window_state="LIVE",
+            optimal_release_window_notice="Application heuristic: optimal publishing window based on sample engagement",
             top_countries=demo_countries,
             scope_limitation_notice=None,
             authorization_url=None,

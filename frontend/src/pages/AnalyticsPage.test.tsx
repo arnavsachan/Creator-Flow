@@ -280,6 +280,7 @@ describe('AnalyticsPage Tests', () => {
       dataState: 'LIVE',
       isLive: true,
       hasAnalyticsScope: true,
+      analyticsVerified: true,
       totalViews: 25000,
       totalSubscribers: 200,
       totalVideos: 15,
@@ -312,9 +313,65 @@ describe('AnalyticsPage Tests', () => {
     });
 
     expect(screen.queryByTestId('authorize-analytics-banner')).not.toBeInTheDocument();
+    expect(screen.getByText('ANALYTICS API VERIFIED')).toBeInTheDocument();
     expect(screen.getByText('12,000')).toBeInTheDocument();
     expect(screen.getByText('48.0%')).toBeInTheDocument();
     expect(screen.getByText('YouTube Search')).toBeInTheDocument();
     expect(screen.getByText('8,000')).toBeInTheDocument();
+  });
+
+  it('renders api-disabled-banner and does NOT display verified badge when Analytics API is disabled in Google Cloud', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'live_disabled_test',
+        channelId: 'UC_DISABLED_TEST',
+        title: 'Disabled Scope Channel',
+        subscriberCount: 43,
+        videoCount: 13,
+        viewCount: 11704,
+        status: 'connected',
+        connectedAt: '2026-10-20T10:00:00Z',
+        lastSyncedAt: '2026-10-20T16:00:00Z',
+      },
+    });
+
+    mockGetChannelAnalytics.mockResolvedValue({
+      channelId: 'UC_DISABLED_TEST',
+      title: 'Disabled Scope Channel',
+      dataState: 'LIVE',
+      isLive: true,
+      hasAnalyticsScope: true,
+      analyticsVerified: false,
+      analyticsError: 'SERVICE_DISABLED',
+      totalViews: 11704,
+      totalSubscribers: 43,
+      totalVideos: 13,
+      trafficSources: null,
+      retentionChart: null,
+      timeSeries: null,
+      scopeNotice: 'YouTube Analytics API data temporarily unavailable.',
+      scopeLimitationNotice: null,
+    });
+
+    render(
+      <AppModeProvider>
+        <AnalyticsPage />
+      </AppModeProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('api-disabled-banner')).toBeInTheDocument();
+    });
+
+    // Badge must NOT be verified
+    expect(screen.queryByText('ANALYTICS API VERIFIED')).not.toBeInTheDocument();
+    expect(screen.getByText(/Google Cloud Action Required: YouTube Analytics API Disabled/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Enable in Google Cloud/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('console.developers.google.com')
+    );
+    expect(screen.getByText(/Discovery vectors unavailable: API disabled in Google Cloud/i)).toBeInTheDocument();
+    expect(screen.getByText(/Daily performance unavailable: API disabled in Google Cloud/i)).toBeInTheDocument();
   });
 });

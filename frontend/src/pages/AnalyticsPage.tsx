@@ -8,7 +8,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { AlertCircle, CheckCircle2, Download, Eye, Filter, Loader2, Sparkles, Tv, Users, Video } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, ExternalLink, Eye, Filter, Loader2, Sparkles, Tv, Users, Video } from 'lucide-react';
 import { useAppMode } from '../context/AppModeContext';
 import { getChannelAnalytics, startOAuth } from '../services/youtubeService';
 import { dashboardSync } from '../services/dashboardSync';
@@ -129,7 +129,7 @@ export const AnalyticsPage: React.FC = () => {
                 DEMO / SAMPLE DATA
               </span>
             )}
-            {data?.hasAnalyticsScope && data?.isLive && (
+            {data?.analyticsVerified && data?.isLive && (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-950 text-indigo-400 border border-indigo-800/80 flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3 text-indigo-400" />
                 <span>ANALYTICS API VERIFIED</span>
@@ -240,6 +240,36 @@ export const AnalyticsPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Google Cloud API Disabled Notice Banner */}
+          {data?.analyticsError === 'SERVICE_DISABLED' && (
+            <div
+              className="p-4 rounded-lg bg-amber-950/40 border border-amber-800/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-amber-200"
+              data-testid="api-disabled-banner"
+            >
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold text-amber-100">
+                    Google Cloud Action Required: YouTube Analytics API Disabled
+                  </div>
+                  <p className="text-xs text-amber-300 leading-relaxed">
+                    OAuth scope authorization succeeded, but the <strong>YouTube Analytics API</strong> is not enabled in Google Cloud Project <code>198142014140</code>.
+                    Enable it in the Google Cloud Console to activate live reports.
+                  </p>
+                </div>
+              </div>
+              <a
+                href="https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 px-3.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span>Enable in Google Cloud</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          )}
+
           {/* Optional Scope Upgrade Banner for Live Channels without Analytics Scope */}
           {data?.isLive && !data?.hasAnalyticsScope && (
             <div
@@ -322,12 +352,28 @@ export const AnalyticsPage: React.FC = () => {
                     ))}
                   </tbody>
                 </table>
+              ) : data?.analyticsVerified ? (
+                <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
+                  <Tv className="w-6 h-6 mx-auto text-zinc-600" />
+                  <p>0 traffic source records returned for this period.</p>
+                  <span className="text-[10px] text-zinc-600 font-mono block">
+                    Data may be below Google's privacy aggregation thresholds.
+                  </span>
+                </div>
+              ) : data?.analyticsError === 'SERVICE_DISABLED' ? (
+                <div className="py-12 text-center text-xs text-amber-400/90 space-y-2">
+                  <AlertCircle className="w-6 h-6 mx-auto text-amber-400" />
+                  <p>Discovery vectors unavailable: API disabled in Google Cloud.</p>
+                  <span className="text-[10px] text-zinc-500 font-mono block">
+                    Enable the YouTube Analytics API in Google Cloud Console.
+                  </span>
+                </div>
               ) : data?.hasAnalyticsScope ? (
                 <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
                   <Tv className="w-6 h-6 mx-auto text-zinc-600" />
-                  <p>No traffic source reports returned for this period.</p>
+                  <p>Traffic source data temporarily unavailable from upstream service.</p>
                   <span className="text-[10px] text-zinc-600 font-mono block">
-                    Data may be below Google's privacy thresholds or not yet processed.
+                    Retry or check API quota status.
                   </span>
                 </div>
               ) : (
@@ -367,7 +413,7 @@ export const AnalyticsPage: React.FC = () => {
                             return (
                               <div className="bg-[#141418] border border-zinc-800 p-2 rounded text-xs space-y-1">
                                 <div className="text-zinc-400 font-mono">{label}</div>
-                                <div className="text-indigo-400 font-mono">Views: {Number(payload[0]?.value).toLocaleString()}</div>
+                                <div className="text-indigo-400 font-mono">Views: {payload[0]?.value?.toLocaleString()}</div>
                               </div>
                             );
                           }
@@ -403,6 +449,22 @@ export const AnalyticsPage: React.FC = () => {
                       <Bar dataKey="shortForm" fill="#38BDF8" radius={[3, 3, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
+                </div>
+              ) : data?.analyticsVerified ? (
+                <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
+                  <div className="w-6 h-6 mx-auto text-zinc-600 font-mono font-bold">%</div>
+                  <p>0 daily performance records returned for this period.</p>
+                  <span className="text-[10px] text-zinc-600 font-mono block">
+                    No time-series analytics recorded for this channel during the requested period.
+                  </span>
+                </div>
+              ) : data?.analyticsError === 'SERVICE_DISABLED' ? (
+                <div className="py-12 text-center text-xs text-amber-400/90 space-y-2">
+                  <AlertCircle className="w-6 h-6 mx-auto text-amber-400" />
+                  <p>Daily performance unavailable: API disabled in Google Cloud.</p>
+                  <span className="text-[10px] text-zinc-500 font-mono block">
+                    Enable the YouTube Analytics API in Google Cloud Console.
+                  </span>
                 </div>
               ) : (
                 <div className="py-12 text-center text-xs text-zinc-500 space-y-2">

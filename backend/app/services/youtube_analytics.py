@@ -120,12 +120,27 @@ def execute_analytics_query(
                     return resp.json()
 
                 if resp.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
-                    err_json = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                    try:
+                        err_json = resp.json()
+                    except Exception:
+                        err_json = {}
                     err_obj = err_json.get("error", {})
                     errors_list = err_obj.get("errors", [])
                     reason = errors_list[0].get("reason") if errors_list else ""
                     msg = err_obj.get("message", "YouTube Analytics API permission denied.")
+                    details = err_obj.get("details", [])
+                    detail_reason = details[0].get("reason") if details else ""
 
+                    if (
+                        reason in ("accessNotConfigured", "SERVICE_DISABLED")
+                        or detail_reason == "SERVICE_DISABLED"
+                        or "not been used in project" in msg.lower()
+                        or "is disabled" in msg.lower()
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="YOUTUBE_ANALYTICS_API_DISABLED",
+                        )
                     if reason in ("insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT") or "scope" in msg.lower():
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -142,7 +157,10 @@ def execute_analytics_query(
                     )
 
                 if resp.status_code == status.HTTP_400_BAD_REQUEST:
-                    err_json = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                    try:
+                        err_json = resp.json()
+                    except Exception:
+                        err_json = {}
                     msg = err_json.get("error", {}).get("message", "Invalid metric or dimension combination.")
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
@@ -245,6 +263,22 @@ def fetch_channel_overview_report(
                 authorization_url=auth_url,
                 message="YouTube Analytics API permissions must be authorized.",
             )
+        if exc.detail == "YOUTUBE_ANALYTICS_API_DISABLED":
+            return AnalyticsOverviewReportResponse(
+                channel_id=channel.channel_id,
+                data_state="SERVICE_DISABLED",
+                is_live=True,
+                has_analytics_scope=True,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+                total_views=0,
+                total_estimated_minutes_watched=0,
+                average_view_duration_seconds=0,
+                net_subscribers=0,
+                time_series=[],
+                message="YouTube Analytics API is not enabled in your Google Cloud project (198142014140). Please enable the API in Google Cloud Console and retry.",
+            )
         raise
 
     column_headers = [col.get("name") for col in report_data.get("columnHeaders", [])]
@@ -313,6 +347,8 @@ def fetch_channel_overview_report(
         total_views=total_views,
         total_estimated_minutes_watched=total_mins,
         average_view_duration_seconds=overall_avd,
+        subscribers_gained=total_subs_gained,
+        subscribers_lost=total_subs_lost,
         net_subscribers=total_subs_gained - total_subs_lost,
         time_series=time_series_points,
     )
@@ -374,6 +410,19 @@ def fetch_traffic_sources_report(
                 traffic_sources=[],
                 authorization_url=auth_url,
                 message="YouTube Analytics API permissions required to view traffic discovery vectors.",
+            )
+        if exc.detail == "YOUTUBE_ANALYTICS_API_DISABLED":
+            return TrafficSourcesReportResponse(
+                channel_id=channel.channel_id,
+                data_state="SERVICE_DISABLED",
+                is_live=True,
+                has_analytics_scope=True,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+                total_views=0,
+                traffic_sources=[],
+                message="YouTube Analytics API is not enabled in your Google Cloud project (198142014140). Please enable the API in Google Cloud Console and retry.",
             )
         raise
 
@@ -487,6 +536,19 @@ def fetch_geography_report(
                 authorization_url=auth_url,
                 message="YouTube Analytics API permissions required to view audience geography.",
             )
+        if exc.detail == "YOUTUBE_ANALYTICS_API_DISABLED":
+            return GeographicAudienceReportResponse(
+                channel_id=channel.channel_id,
+                data_state="SERVICE_DISABLED",
+                is_live=True,
+                has_analytics_scope=True,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+                total_views=0,
+                top_countries=[],
+                message="YouTube Analytics API is not enabled in your Google Cloud project (198142014140). Please enable the API in Google Cloud Console and retry.",
+            )
         raise
 
     column_headers = [col.get("name") for col in report_data.get("columnHeaders", [])]
@@ -536,4 +598,126 @@ def fetch_geography_report(
         days=days,
         total_views=total_views,
         top_countries=items,
+    )
+
+
+RETURNING_VIEWERS_NOT_SUPPORTED_NOTICE = "YouTube Studio-exclusive metric; not exposed by YouTube Analytics API"
+
+
+def calculate_subscriber_conversion(
+    views: int,
+    subscribers_gained: int,
+    days: int,
+) -> tuple[Optional[str], str, str]:
+    """
+    Calculates subscriber conversion rate from verified YouTube Analytics metrics.
+    Formula: (subscribersGained / views) * 100
+
+    Returns:
+        (rate_str_or_none, data_state, explanation_notice)
+    """
+    if views <= 0:
+        if subscribers_gained > 0:
+            notice = f"{subscribers_gained} subs gained, but 0 views in {days}d lookback window (conversion rate requires views)"
+        else:
+            notice = f"0 views in {days}d lookback window (conversion rate requires views)"
+        return (
+            None,
+            "NO_DATA",
+            notice,
+        )
+
+    clamped_subs = max(0, subscribers_gained)
+    rate = (clamped_subs / views) * 100
+    return (
+        f"{rate:.2f}%",
+        "LIVE",
+        f"+{clamped_subs} subs gained across {views:,} views ({days}d window)",
+    )
+
+
+def calculate_optimal_release_window(
+    db: Session,
+    channel_id: str,
+    total_uploads: int,
+) -> tuple[str, str, str]:
+    """
+    Evaluates video publication history using an application heuristic
+    to estimate potential release windows based on historical weekday view velocity.
+
+    This is an application-level heuristic and NOT an official YouTube Analytics API metric
+    or requirement.
+
+    Returns:
+        (window_display_str, data_state, explanation_notice)
+    """
+    from collections import defaultdict
+    from app.models.video import ChannelVideo
+
+    MIN_UPLOADS_REQUIRED = 20
+    MIN_WEEKDAY_COVERAGE = 4
+
+    if total_uploads < MIN_UPLOADS_REQUIRED:
+        return (
+            "Insufficient Data",
+            "INSUFFICIENT_HISTORY",
+            f"Application heuristic: requires ≥{MIN_UPLOADS_REQUIRED} public uploads to estimate timing (channel has {total_uploads})",
+        )
+
+    videos = db.query(ChannelVideo).filter(ChannelVideo.channel_id == channel_id).all()
+    if len(videos) < MIN_UPLOADS_REQUIRED:
+        return (
+            "Insufficient Data",
+            "INSUFFICIENT_HISTORY",
+            f"Application heuristic: requires ≥{MIN_UPLOADS_REQUIRED} synced video uploads to analyze publishing patterns (synced: {len(videos)})",
+        )
+
+    day_stats: dict[str, dict[str, int]] = defaultdict(lambda: {"count": 0, "total_views": 0})
+    for v in videos:
+        if v.published_at:
+            weekday = v.published_at.strftime("%A")
+            day_stats[weekday]["count"] += 1
+            day_stats[weekday]["total_views"] += int(v.view_count or 0)
+
+    if len(day_stats) < MIN_WEEKDAY_COVERAGE:
+        return (
+            "Insufficient Data",
+            "INSUFFICIENT_HISTORY",
+            f"Application heuristic: uploads distributed across only {len(day_stats)} weekday(s); requires ≥{MIN_WEEKDAY_COVERAGE} distinct weekdays to compare release timing reliably",
+        )
+
+    total_views_across_videos = sum(s["total_views"] for s in day_stats.values())
+    if total_views_across_videos <= 0:
+        return (
+            "Insufficient Data",
+            "INSUFFICIENT_HISTORY",
+            "Application heuristic: uploads have 0 recorded views; cannot compare weekday performance",
+        )
+
+    ranked = sorted(
+        day_stats.items(),
+        key=lambda item: item[1]["total_views"] / item[1]["count"] if item[1]["count"] else 0,
+        reverse=True,
+    )
+
+    best_day = ranked[0][0]
+    second_day = ranked[1][0] if len(ranked) > 1 and ranked[1][1]["count"] > 0 else None
+
+    if second_day:
+        window_str = f"{best_day}s & {second_day}s"
+        notice = (
+            f"Application heuristic: {best_day}s & {second_day}s had highest avg views across "
+            f"{len(videos)} uploads (experimental estimate, not an official YouTube metric)"
+        )
+    else:
+        window_str = f"{best_day}s"
+        notice = (
+            f"Application heuristic: {best_day}s had highest avg views across "
+            f"{len(videos)} uploads (experimental estimate, not an official YouTube metric)"
+        )
+
+    return (
+        window_str,
+        "LIVE",
+        notice,
     )

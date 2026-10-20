@@ -105,9 +105,12 @@ export interface AnalyticsTelemetryResponse {
   totalSubscribers: number;
   totalVideos: number;
   hasAnalyticsScope?: boolean;
+  analyticsVerified?: boolean;
+  analyticsError?: string | null;
   trafficSources?: TrafficSourceItem[] | null;
   retentionChart?: RetentionPoint[] | null;
   timeSeries?: AnalyticsDayPoint[] | null;
+  scopeNotice?: string | null;
   scopeLimitationNotice?: string | null;
   authorizationUrl?: string | null;
 }
@@ -126,11 +129,21 @@ export interface AudienceTelemetryResponse {
   subscribers: number;
   totalViews: number;
   uploads: number;
+  days?: number | null;
   hasAnalyticsScope?: boolean;
+  analyticsVerified?: boolean;
+  analyticsError?: string | null;
   returningViewersRate?: string | null;
+  returningViewersState?: string | null;
+  returningViewersNotice?: string | null;
   subscriberConversionRate?: string | null;
+  subscriberConversionState?: string | null;
+  subscriberConversionNotice?: string | null;
   optimalReleaseWindow?: string | null;
+  optimalReleaseWindowState?: string | null;
+  optimalReleaseWindowNotice?: string | null;
   topCountries?: GeographicViewerItem[] | null;
+  scopeNotice?: string | null;
   scopeLimitationNotice?: string | null;
   authorizationUrl?: string | null;
 }

@@ -92,6 +92,8 @@ class AnalyticsOverviewReportResponse(CamelModel):
     total_views: int
     total_estimated_minutes_watched: int
     average_view_duration_seconds: int
+    subscribers_gained: int = 0
+    subscribers_lost: int = 0
     net_subscribers: int
     time_series: list[AnalyticsDayPoint]
     authorization_url: Optional[str] = None
@@ -141,9 +143,12 @@ class AnalyticsTelemetryResponse(CamelModel):
     total_subscribers: int
     total_videos: int
     has_analytics_scope: bool = False
+    analytics_verified: bool = False
+    analytics_error: Optional[str] = None
     traffic_sources: Optional[list[TrafficSourceItem]] = None
     retention_chart: Optional[list[RetentionPoint]] = None
     time_series: Optional[list[AnalyticsDayPoint]] = None
+    scope_notice: Optional[str] = None
     scope_limitation_notice: Optional[str] = None
     authorization_url: Optional[str] = None
 
@@ -156,11 +161,21 @@ class AudienceTelemetryResponse(CamelModel):
     subscribers: int
     total_views: int
     uploads: int
+    days: Optional[int] = None
     has_analytics_scope: bool = False
+    analytics_verified: bool = False
+    analytics_error: Optional[str] = None
     returning_viewers_rate: Optional[str] = None
+    returning_viewers_state: Optional[str] = None
+    returning_viewers_notice: Optional[str] = None
     subscriber_conversion_rate: Optional[str] = None
+    subscriber_conversion_state: Optional[str] = None
+    subscriber_conversion_notice: Optional[str] = None
     optimal_release_window: Optional[str] = None
+    optimal_release_window_state: Optional[str] = None
+    optimal_release_window_notice: Optional[str] = None
     top_countries: Optional[list[GeographicViewerItem]] = None
+    scope_notice: Optional[str] = None
     scope_limitation_notice: Optional[str] = None
     authorization_url: Optional[str] = None
 
