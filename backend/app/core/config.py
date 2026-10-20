@@ -27,6 +27,52 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
     ]
     DOCS_URL: str | None = "/docs"
+    FFMPEG_BIN: str = "ffmpeg"
+    FFPROBE_BIN: str = "ffprobe"
+    SHORTS_STORAGE_DIR: Path = BACKEND_DIR / "storage" / "shorts"
+    SHORTS_MAX_UPLOAD_MB: int = 500
+    SHORTS_MAX_DURATION_SECONDS: int = 3600
+    SHORTS_MAX_CLIP_SECONDS: int = 180
+    SHORTS_ENABLED_ENVIRONMENTS: list[str] | str = [
+        "development",
+        "test",
+    ]
+
+    @field_validator("SHORTS_STORAGE_DIR", mode="before")
+    @classmethod
+    def parse_shorts_storage_dir(cls, v: Any) -> Path:
+        if v is None:
+            return (BACKEND_DIR / "storage" / "shorts").resolve()
+        if isinstance(v, str):
+            v_stripped = v.strip()
+            if not v_stripped:
+                return (BACKEND_DIR / "storage" / "shorts").resolve()
+            p = Path(v_stripped)
+            if not p.is_absolute():
+                return (BACKEND_DIR / p).resolve()
+            return p.resolve()
+        if isinstance(v, Path):
+            if not v.is_absolute():
+                return (BACKEND_DIR / v).resolve()
+            return v.resolve()
+        return (BACKEND_DIR / "storage" / "shorts").resolve()
+
+    @field_validator("SHORTS_ENABLED_ENVIRONMENTS", mode="before")
+    @classmethod
+    def parse_shorts_enabled_environments(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            v_stripped = v.strip()
+            if v_stripped.startswith("[") and v_stripped.endswith("]"):
+                try:
+                    parsed = json.loads(v_stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except Exception:
+                    pass
+            return [part.strip() for part in v.split(",") if part.strip()]
+        if isinstance(v, (list, tuple, set)):
+            return [str(part).strip() for part in v if str(part).strip()]
+        return ["development", "test"]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

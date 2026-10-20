@@ -11,3 +11,6 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+storage/
+dev_local/
+*.sqlite3

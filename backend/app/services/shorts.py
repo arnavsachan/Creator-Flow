@@ -1,0 +1,336 @@
+from datetime import datetime, timezone
+import logging
+from pathlib import Path
+from typing import Optional
+import uuid
+
+from fastapi import BackgroundTasks, UploadFile
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.config import Settings
+from app.db.session import get_session_factory
+from app.models.shorts import ShortsClip, ShortsJob
+from app.schemas.shorts import (
+    CreateClipRequest,
+    ShortsClipData,
+    ShortsJobData,
+)
+from app.services.media import (
+    ALLOWED_EXTENSIONS,
+    MediaValidationError,
+    generate_clip,
+    probe_media,
+    safe_resolve_storage_file,
+)
+
+logger = logging.getLogger(__name__)
+
+# In-memory tracking of actively processing background tasks
+# Used to detect clips interrupted across server restart
+_ACTIVE_TASKS: set[str] = set()
+
+
+def clip_to_data(clip: ShortsClip) -> ShortsClipData:
+    return ShortsClipData(
+        id=clip.id,
+        job_id=clip.job_id,
+        start_seconds=clip.start_seconds,
+        end_seconds=clip.end_seconds,
+        aspect=clip.aspect,
+        status=clip.status,
+        error_code=clip.error_code,
+        created_at=clip.created_at.isoformat() if clip.created_at else "",
+        finished_at=clip.finished_at.isoformat() if clip.finished_at else None,
+    )
+
+
+def job_to_data(job: ShortsJob) -> ShortsJobData:
+    return ShortsJobData(
+        id=job.id,
+        owner_id=job.owner_id,
+        original_filename=job.original_filename,
+        size_bytes=job.size_bytes,
+        duration_seconds=job.duration_seconds,
+        width=job.width,
+        height=job.height,
+        status=job.status,
+        error_code=job.error_code,
+        created_at=job.created_at.isoformat() if job.created_at else "",
+        clips=[clip_to_data(c) for c in (job.clips or [])],
+    )
+
+
+def _check_interrupted_clip(clip: ShortsClip, db: Session) -> bool:
+    """
+    If a clip is marked 'processing' in the database but its task is not active in memory,
+    it was interrupted by a server restart. Mark it failed with error_code INTERRUPTED.
+    """
+    if clip.status == "processing" and clip.id not in _ACTIVE_TASKS:
+        clip.status = "failed"
+        clip.error_code = "INTERRUPTED"
+        clip.finished_at = datetime.now(timezone.utc)
+        return True
+    return False
+
+
+async def upload_video_job(
+    file: UploadFile,
+    db: Session,
+    settings: Settings,
+) -> ShortsJob:
+    """
+    Streams the uploaded video to disk in 1MB chunks, validating extension and enforcing
+    max size while streaming. Uses ffprobe to validate media integrity and duration.
+    On any failure, deletes the stored file and raises a MediaValidationError with stable code.
+    """
+    original_name = file.filename or ""
+    # Strip any directory path components from user filename
+    sanitized_name = Path(original_name).name
+    ext = Path(sanitized_name).suffix.lower()
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise MediaValidationError("UNSUPPORTED_FORMAT")
+
+    storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    job_id = str(uuid.uuid4())
+    stored_path = (storage_dir / f"{job_id}{ext}").resolve()
+
+    total_bytes = 0
+    max_bytes = settings.SHORTS_MAX_UPLOAD_MB * 1024 * 1024
+
+    try:
+        with open(stored_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    f.close()
+                    stored_path.unlink(missing_ok=True)
+                    raise MediaValidationError("FILE_TOO_LARGE")
+                f.write(chunk)
+    except MediaValidationError:
+        raise
+    except Exception as exc:
+        stored_path.unlink(missing_ok=True)
+        logger.error("Failed to stream upload to disk: %s", type(exc).__name__)
+        raise MediaValidationError("INVALID_MEDIA")
+
+    if total_bytes == 0:
+        stored_path.unlink(missing_ok=True)
+        raise MediaValidationError("INVALID_MEDIA")
+
+    # Validate with ffprobe
+    try:
+        media_info = probe_media(stored_path, ffprobe_bin=settings.FFPROBE_BIN)
+    except MediaValidationError:
+        stored_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        stored_path.unlink(missing_ok=True)
+        logger.error("Media probe error: %s", type(exc).__name__)
+        raise MediaValidationError("INVALID_MEDIA")
+
+    if media_info.duration > settings.SHORTS_MAX_DURATION_SECONDS:
+        stored_path.unlink(missing_ok=True)
+        raise MediaValidationError("DURATION_EXCEEDED")
+
+    job = ShortsJob(
+        id=job_id,
+        owner_id=None,
+        original_filename=sanitized_name,
+        stored_path=str(stored_path),
+        size_bytes=total_bytes,
+        duration_seconds=media_info.duration,
+        width=media_info.width,
+        height=media_info.height,
+        status="uploaded",
+        error_code=None,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def list_jobs(db: Session) -> list[ShortsJob]:
+    stmt = select(ShortsJob).order_by(ShortsJob.created_at.desc())
+    jobs = list(db.scalars(stmt).all())
+
+    modified = False
+    for job in jobs:
+        for clip in job.clips or []:
+            if _check_interrupted_clip(clip, db):
+                modified = True
+
+    if modified:
+        db.commit()
+
+    return jobs
+
+
+def get_job(job_id: str, db: Session) -> ShortsJob:
+    job = db.get(ShortsJob, job_id)
+    if not job:
+        raise MediaValidationError("JOB_NOT_FOUND")
+
+    modified = False
+    for clip in job.clips or []:
+        if _check_interrupted_clip(clip, db):
+            modified = True
+
+    if modified:
+        db.commit()
+        db.refresh(job)
+
+    return job
+
+
+def process_clip_task(clip_id: str, job_id: str, settings: Settings) -> None:
+    """
+    Background task executing ffmpeg trimming. Never leaks internal paths or raw stderr.
+    """
+    _ACTIVE_TASKS.add(clip_id)
+    session_factory = get_session_factory()
+    db = session_factory()
+
+    try:
+        clip = db.get(ShortsClip, clip_id)
+        job = db.get(ShortsJob, job_id)
+        if not clip or not job:
+            return
+
+        clip.status = "processing"
+        db.commit()
+
+        input_path = Path(job.stored_path)
+        output_path = Path(clip.output_path) if clip.output_path else None
+
+        if not output_path:
+            raise MediaValidationError("PROCESSING_FAILED")
+
+        generate_clip(
+            input_path=input_path,
+            output_path=output_path,
+            start=clip.start_seconds,
+            end=clip.end_seconds,
+            aspect=clip.aspect,
+            ffmpeg_bin=settings.FFMPEG_BIN,
+        )
+
+        clip.status = "done"
+        clip.finished_at = datetime.now(timezone.utc)
+        clip.error_code = None
+        db.commit()
+    except Exception as exc:
+        logger.error("FFmpeg background clipping failed: %s", type(exc).__name__)
+        try:
+            if clip:
+                clip.status = "failed"
+                clip.error_code = "PROCESSING_FAILED"
+                clip.finished_at = datetime.now(timezone.utc)
+                if clip.output_path:
+                    Path(clip.output_path).unlink(missing_ok=True)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        _ACTIVE_TASKS.discard(clip_id)
+        db.close()
+
+
+def create_clip(
+    job_id: str,
+    req: CreateClipRequest,
+    db: Session,
+    settings: Settings,
+    background_tasks: BackgroundTasks,
+) -> ShortsClip:
+    job = db.get(ShortsJob, job_id)
+    if not job:
+        raise MediaValidationError("JOB_NOT_FOUND")
+
+    # Validate clip range
+    if req.start_seconds < 0 or req.start_seconds >= req.end_seconds or req.end_seconds > job.duration_seconds:
+        raise MediaValidationError("INVALID_RANGE")
+
+    clip_len = req.end_seconds - req.start_seconds
+    if clip_len > settings.SHORTS_MAX_CLIP_SECONDS:
+        raise MediaValidationError("INVALID_RANGE")
+
+    clip_id = str(uuid.uuid4())
+    storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    output_path = (storage_dir / f"clip_{clip_id}.mp4").resolve()
+
+    clip = ShortsClip(
+        id=clip_id,
+        job_id=job.id,
+        start_seconds=req.start_seconds,
+        end_seconds=req.end_seconds,
+        aspect=req.aspect,
+        status="queued",
+        error_code=None,
+        output_path=str(output_path),
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(clip)
+    db.commit()
+    db.refresh(clip)
+
+    background_tasks.add_task(process_clip_task, clip_id=clip_id, job_id=job.id, settings=settings)
+    return clip
+
+
+def get_clip(job_id: str, clip_id: str, db: Session) -> ShortsClip:
+    stmt = select(ShortsClip).where(ShortsClip.id == clip_id, ShortsClip.job_id == job_id)
+    clip = db.scalar(stmt)
+    if not clip:
+        raise MediaValidationError("CLIP_NOT_FOUND")
+
+    if _check_interrupted_clip(clip, db):
+        db.commit()
+        db.refresh(clip)
+
+    return clip
+
+
+def delete_job(job_id: str, db: Session, storage_dir: Path) -> None:
+    """
+    Removes database rows and all associated storage files.
+    Missing files must not crash.
+    """
+    job = db.get(ShortsJob, job_id)
+    if not job:
+        raise MediaValidationError("JOB_NOT_FOUND")
+
+    # Delete clip files
+    for clip in job.clips or []:
+        if clip.output_path:
+            try:
+                safe_path = safe_resolve_storage_file(clip.output_path, storage_dir)
+                safe_path.unlink(missing_ok=True)
+            except Exception:
+                try:
+                    Path(clip.output_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    # Delete source video file
+    if job.stored_path:
+        try:
+            safe_path = safe_resolve_storage_file(job.stored_path, storage_dir)
+            safe_path.unlink(missing_ok=True)
+        except Exception:
+            try:
+                Path(job.stored_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    db.delete(job)
+    db.commit()
