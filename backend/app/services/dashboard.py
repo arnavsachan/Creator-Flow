@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy.orm import Session
+
 from app.schemas.dashboard import (
     ActionableInsight,
     DashboardKpis,
@@ -16,7 +18,6 @@ DEFAULT_CHANNEL_ID = "demo-channel-1"
 SUPPORTED_CHANNEL_IDS = {
     DEFAULT_CHANNEL_ID,
     "demo-channel-2",
-    "uc-live-001",
 }
 
 
@@ -278,31 +279,224 @@ def build_empty_dashboard_data(channel_id: str) -> DashboardOverviewData:
     )
 
 
-def get_dashboard_overview(channel_id: Optional[str] = None) -> DashboardOverviewResponse:
+def format_relative_time(dt: datetime) -> str:
+    now = datetime.now(timezone.utc)
+    dt_utc = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    diff = now - dt_utc
+    days = diff.days
+    if days < 0:
+        return dt_utc.strftime("%b %d, %Y")
+    if days == 0:
+        hours = int(diff.total_seconds() // 3600)
+        if hours <= 1:
+            return "Today"
+        return f"{hours} hours ago"
+    if days == 1:
+        return "Yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    weeks = days // 7
+    if weeks == 1:
+        return "1 week ago"
+    if weeks < 5:
+        return f"{weeks} weeks ago"
+    months = days // 30
+    if months == 1:
+        return "1 month ago"
+    if months < 12:
+        return f"{months} months ago"
+    years = days // 365
+    return f"{years} year{'s' if years > 1 else ''} ago"
+
+
+def get_dashboard_overview(
+    channel_id: Optional[str] = None,
+    db: Optional[Session] = None,
+    days: int = 28,
+) -> DashboardOverviewResponse:
     """
     Returns dashboard overview data in the standard data-state envelope.
-    Supports registered channels ('demo-channel-1', 'demo-channel-2', 'uc-live-001').
-    Raises ValueError for unknown channel IDs.
+    - If channel_id matches a live connected channel in the database, returns LIVE data
+      including real historical velocity chart points and recent video uploads.
+    - If channel_id matches a registered demo channel ('demo-channel-1', 'demo-channel-2'),
+      returns DEMO data.
+    - Raises ValueError for unknown channel IDs.
     """
     target_channel = (channel_id or DEFAULT_CHANNEL_ID).strip()
 
-    if target_channel not in SUPPORTED_CHANNEL_IDS:
-        raise ValueError(
-            f"Channel '{target_channel}' not found. Supported channels: {sorted(list(SUPPORTED_CHANNEL_IDS))}."
+    # 1. Check if channel exists in database as a live connected channel
+    if db is not None:
+        from app.models.channel import ConnectedChannel
+        from app.models.snapshot import ChannelSnapshot
+        from app.models.video import ChannelVideo
+        from app.services.youtube_oauth import (
+            get_channel_snapshots,
+            get_channel_videos,
+            record_channel_snapshot,
         )
 
-    overview_data = DashboardOverviewData(
-        channel_id=target_channel,
-        kpis=build_demo_kpis(),
-        velocity_chart=build_demo_chart_points(),
-        actionable_insights=build_demo_insights(),
-        recent_videos=build_demo_recent_videos(),
-        content_pipeline=build_demo_pipeline_items(),
-    )
+        channel_record = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.channel_id == target_channel)
+            .first()
+        )
+        if channel_record and channel_record.status == "connected":
+            # Real live channel metrics from YouTube Data API
+            views = int(channel_record.view_count or 0)
+            subscribers = int(channel_record.subscriber_count or 0)
+            videos = int(channel_record.video_count or 0)
+            synced_at = (
+                channel_record.last_synced_at.isoformat()
+                if channel_record.last_synced_at
+                else datetime.now(timezone.utc).isoformat()
+            )
 
-    return DashboardOverviewResponse(
-        data_state="DEMO",
-        last_synced_at=datetime.now(timezone.utc).isoformat(),
-        message=f"Displaying synthetic demo telemetry for channel '{target_channel}'.",
-        data=overview_data,
+            # Ensure an initial snapshot exists if none have been recorded yet
+            existing_snapshots_count = (
+                db.query(ChannelSnapshot)
+                .filter(ChannelSnapshot.channel_id == target_channel)
+                .count()
+            )
+            if existing_snapshots_count == 0:
+                record_channel_snapshot(
+                    db=db,
+                    channel_id=target_channel,
+                    subscriber_count=subscribers,
+                    video_count=videos,
+                    view_count=views,
+                    sync_status="success",
+                )
+
+            # Query historical snapshots for requested date range
+            snapshots = get_channel_snapshots(db, target_channel, days=days)
+
+            # Compute change & sparkline points if multiple snapshots exist
+            views_change: Optional[float] = None
+            formatted_v_change: Optional[str] = None
+            views_trend: str = "neutral"
+            views_sparkline: list[float | int] = []
+
+            subs_change: Optional[float] = None
+            formatted_s_change: Optional[str] = None
+            subs_trend: str = "neutral"
+            subs_sparkline: list[float | int] = []
+
+            if len(snapshots) >= 2:
+                first_snap = snapshots[0]
+                last_snap = snapshots[-1]
+                v_diff = last_snap.view_count - first_snap.view_count
+                s_diff = last_snap.subscriber_count - first_snap.subscriber_count
+
+                if first_snap.view_count > 0:
+                    views_change = round((v_diff / first_snap.view_count) * 100, 1)
+                    views_trend = "up" if v_diff > 0 else ("down" if v_diff < 0 else "neutral")
+                if first_snap.subscriber_count > 0:
+                    subs_change = round((s_diff / first_snap.subscriber_count) * 100, 1)
+                    subs_trend = "up" if s_diff > 0 else ("down" if s_diff < 0 else "neutral")
+
+                views_sparkline = [s.view_count for s in snapshots][-10:]
+                subs_sparkline = [s.subscriber_count for s in snapshots][-10:]
+
+                formatted_v_change = f"+{views_change}%" if views_change > 0 else f"{views_change}%"
+                formatted_s_change = f"+{subs_change}%" if subs_change > 0 else f"{subs_change}%"
+
+            kpis = DashboardKpis(
+                total_views=KpiMetric(
+                    title="Total Views",
+                    value=views,
+                    formatted_value=f"{views:,}",
+                    change=views_change,
+                    formatted_change=formatted_v_change,
+                    trend=views_trend,
+                    change_period=f"vs previous {days}d" if len(snapshots) >= 2 else "Initial baseline snapshot",
+                    sparkline_points=views_sparkline,
+                ),
+                net_subscribers=KpiMetric(
+                    title="Total Subscribers",
+                    value=subscribers,
+                    formatted_value=f"{subscribers:,}",
+                    change=subs_change,
+                    formatted_change=formatted_s_change,
+                    trend=subs_trend,
+                    change_period=f"vs previous {days}d" if len(snapshots) >= 2 else "Initial baseline snapshot",
+                    sparkline_points=subs_sparkline,
+                ),
+                watch_time_hours=KpiMetric(
+                    title="Total Uploads",
+                    value=videos,
+                    formatted_value=f"{videos:,}",
+                    change=None,
+                    formatted_change=None,
+                    trend="neutral",
+                    change_period="Public Videos",
+                    sparkline_points=[],
+                ),
+                estimated_partner_revenue=None,
+            )
+
+            # Map velocity chart points from real database snapshots
+            velocity_chart = [
+                VelocityChartPoint(
+                    date=s.snapshot_at.strftime("%b %d"),
+                    views=s.view_count,
+                    watch_time=0,
+                    subscribers=s.subscriber_count,
+                )
+                for s in snapshots
+            ]
+
+            # Query real recent videos from database
+            stored_videos = get_channel_videos(db, target_channel, limit=10)
+            recent_videos = [
+                RecentVideoItem(
+                    id=v.video_id,
+                    title=v.title,
+                    published=format_relative_time(v.published_at),
+                    views=v.view_count,
+                    formatted_views=f"{v.view_count:,}",
+                    avd="—",
+                    ctr="—",
+                    raw_ctr=None,
+                    ctr_status="normal",
+                    thumbnail_url=v.thumbnail_url,
+                )
+                for v in stored_videos
+            ]
+
+            overview_data = DashboardOverviewData(
+                channel_id=target_channel,
+                kpis=kpis,
+                velocity_chart=velocity_chart,
+                actionable_insights=[],
+                recent_videos=recent_videos,
+                content_pipeline=[],
+            )
+
+            return DashboardOverviewResponse(
+                data_state="LIVE",
+                last_synced_at=synced_at,
+                message=f"Live telemetry for channel '{channel_record.title}' ({target_channel}).",
+                data=overview_data,
+            )
+
+    # 2. Check registered demo channels
+    if target_channel in SUPPORTED_CHANNEL_IDS:
+        overview_data = DashboardOverviewData(
+            channel_id=target_channel,
+            kpis=build_demo_kpis(),
+            velocity_chart=build_demo_chart_points(),
+            actionable_insights=build_demo_insights(),
+            recent_videos=build_demo_recent_videos(),
+            content_pipeline=build_demo_pipeline_items(),
+        )
+
+        return DashboardOverviewResponse(
+            data_state="DEMO",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            message=f"Displaying synthetic demo telemetry for channel '{target_channel}'.",
+            data=overview_data,
+        )
+
+    raise ValueError(
+        f"Channel '{target_channel}' not found. Supported channels: {sorted(list(SUPPORTED_CHANNEL_IDS))} or active connected channels."
     )

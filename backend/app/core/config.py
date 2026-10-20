@@ -27,6 +27,18 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
     ]
     DOCS_URL: str | None = "/docs"
+    FRONTEND_URL: str = "http://localhost:5173"
+
+    # Google OAuth 2.0
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/youtube/oauth/callback"
+
+    # Security & Encryption
+    TOKEN_ENCRYPTION_KEY: str = "creatorflow-default-encryption-key-for-development"
+    JWT_SECRET_KEY: str = "creatorflow-default-jwt-secret-key-for-development"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

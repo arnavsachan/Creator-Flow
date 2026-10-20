@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useLocation } from 'react-router-dom';
 import { ChevronDown, RefreshCw, Tv } from 'lucide-react';
 import { useAppMode } from '../../context/AppModeContext';
@@ -12,8 +12,15 @@ interface TopbarProps {
 
 export const Topbar: React.FC<TopbarProps> = ({ onRefresh, isSyncing = false }) => {
   const location = useLocation();
-  const { dataState, setDataState, selectedChannelId, setSelectedChannelId } = useAppMode();
-  const [dateRange, setDateRange] = useState<'7d' | '28d' | '90d' | '365d'>('28d');
+  const {
+    dataState,
+    setDataState,
+    selectedChannelId,
+    setSelectedChannelId,
+    connectedChannel,
+    dateRange,
+    setDateRange,
+  } = useAppMode();
 
   const states: DataState[] = ['DEMO', 'LIVE', 'STALE', 'UNAVAILABLE'];
 
@@ -68,15 +75,32 @@ export const Topbar: React.FC<TopbarProps> = ({ onRefresh, isSyncing = false }) 
               onChange={(e) => setSelectedChannelId(e.target.value)}
               className="appearance-none bg-transparent text-xs text-zinc-200 focus:outline-none cursor-pointer pr-4 font-medium"
             >
-              <option value="demo-channel-1" className="bg-zinc-900 text-zinc-200">
-                Tech Pulse (Demo)
-              </option>
-              <option value="demo-channel-2" className="bg-zinc-900 text-zinc-200">
-                Gaming Frontier
-              </option>
-              <option value="uc-live-001" className="bg-zinc-900 text-zinc-200">
-                @CreatorDaily (Live)
-              </option>
+              {connectedChannel ? (
+                <>
+                  <optgroup label="Connected Channel (Live)">
+                    <option value={connectedChannel.channelId} className="bg-zinc-900 text-emerald-400 font-medium">
+                      {connectedChannel.title} (Live)
+                    </option>
+                  </optgroup>
+                  <optgroup label="Simulated Sandbox (Demo Profiles)">
+                    <option value="demo-channel-1" className="bg-zinc-900 text-zinc-400">
+                      [Demo] Tech Pulse (Simulated)
+                    </option>
+                    <option value="demo-channel-2" className="bg-zinc-900 text-zinc-400">
+                      [Demo] Gaming Frontier (Simulated)
+                    </option>
+                  </optgroup>
+                </>
+              ) : (
+                <optgroup label="Simulated Sandbox Profiles">
+                  <option value="demo-channel-1" className="bg-zinc-900 text-zinc-200">
+                    [Demo] Tech Pulse (Simulated)
+                  </option>
+                  <option value="demo-channel-2" className="bg-zinc-900 text-zinc-200">
+                    [Demo] Gaming Frontier (Simulated)
+                  </option>
+                </optgroup>
+              )}
             </select>
             <ChevronDown className="w-3 h-3 text-zinc-500 absolute right-2 pointer-events-none" />
           </div>

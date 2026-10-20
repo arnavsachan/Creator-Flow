@@ -89,6 +89,7 @@ const createMockSuccessResponse = (
 
 describe('DashboardPage Reliability Tests', () => {
   beforeEach(() => {
+    localStorage.clear();
     vi.clearAllMocks();
   });
 
@@ -326,8 +327,8 @@ describe('DashboardPage Reliability Tests', () => {
       expect(mockGetDashboardOverview).toHaveBeenCalledTimes(2);
     });
 
-    // Verified: retry called with SAME selectedChannelId uc-live-001
-    expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('uc-live-001', expect.any(AbortSignal));
+    // Verified: retry called with SAME selectedChannelId uc-live-001 and days=28
+    expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('uc-live-001', 28, expect.any(AbortSignal));
 
     await waitFor(() => {
       expect(screen.getByText('50,000')).toBeInTheDocument();
@@ -425,5 +426,58 @@ describe('DashboardPage Reliability Tests', () => {
     // The late response must NOT overwrite uc-live-002
     expect(screen.getByText('99,999')).toBeInTheDocument();
     expect(screen.queryByText('11,111')).not.toBeInTheDocument();
+  });
+
+  // i. Phase 2: Live Recent Video Performance & Velocity Chart telemetry states
+  it('i. Renders live recent videos and single-snapshot baseline telemetry message', async () => {
+    const singleSnapshotData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...createMockSuccessResponse('uc-live-001').data!,
+        velocityChart: [
+          { date: 'Oct 20', views: 11704, watchTime: 0, subscribers: 43 },
+        ],
+        recentVideos: [
+          {
+            id: 'real-vid-abc',
+            title: 'Are bananas radioactive?? #shorts',
+            published: '3 days ago',
+            views: 4500,
+            formattedViews: '4,500',
+            avd: '—',
+            ctr: 'N/A',
+            ctrStatus: 'normal',
+          },
+        ],
+      },
+    });
+
+    mockGetDashboardOverview.mockResolvedValue(singleSnapshotData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Verify recent video is rendered
+    await waitFor(() => {
+      expect(screen.getByText('Are bananas radioactive?? #shorts')).toBeInTheDocument();
+    });
+    expect(screen.getByText('4,500')).toBeInTheDocument();
+    expect(screen.getByText('3 days ago')).toBeInTheDocument();
+
+    // Verify single-snapshot velocity chart explanation is displayed
+    expect(
+      screen.getByText(/baseline telemetry snapshot recorded/i)
+    ).toBeInTheDocument();
+
+    // Verify clear Insufficient History card is rendered
+    expect(screen.getByTestId('insufficient-history-state')).toBeInTheDocument();
+    expect(
+      screen.getByText('Insufficient History for Growth Trajectory')
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('sync-now-insufficient-history')).toBeInTheDocument();
   });
 });

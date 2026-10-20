@@ -10,11 +10,14 @@ import type { DashboardOverviewResponse } from '../types/dashboard';
  */
 export async function getDashboardOverview(
   channelId?: string,
+  days?: number,
   signal?: AbortSignal
 ): Promise<DashboardOverviewResponse> {
-  const params = channelId ? { channel_id: channelId } : undefined;
+  const params: Record<string, string | number> = {};
+  if (channelId) params.channel_id = channelId;
+  if (days) params.days = days;
   const response = await apiClient.get<DashboardOverviewResponse>('/dashboard/overview', {
-    params,
+    params: Object.keys(params).length > 0 ? params : undefined,
     signal,
   });
   return response.data;

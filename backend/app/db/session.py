@@ -21,12 +21,19 @@ def get_engine() -> Engine:
     global _engine
     if _engine is None:
         settings = get_settings()
+        connect_args = {}
+        if "postgresql" in settings.DATABASE_URL:
+            connect_args = {"connect_timeout": 3}
+        elif "sqlite" in settings.DATABASE_URL:
+            connect_args = {"check_same_thread": False}
+
         _engine = create_engine(
             settings.DATABASE_URL,
             pool_pre_ping=True,
-            connect_args={"connect_timeout": 3},
+            connect_args=connect_args,
         )
     return _engine
+
 
 
 def get_session_factory() -> sessionmaker[Session]:
