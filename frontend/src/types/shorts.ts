@@ -67,3 +67,33 @@ export interface TranscriptData {
 
 export type TranscriptResponse = EnvelopeResponse<TranscriptData>;
 
+export interface HighlightSuggestion {
+  id: string;
+  start: number;
+  end: number;
+  title: string;
+  reason: string;
+  status?: string;
+}
+
+export type HighlightsState = 'none' | 'running' | 'done' | 'failed' | 'not_configured';
+
+export interface HighlightsData {
+  jobId: string;
+  state: HighlightsState;
+  errorCode: string | null;
+  suggestions: HighlightSuggestion[];
+  modelUsed: string | null;
+  transcriptTruncated: boolean;
+}
+
+export type HighlightsResponse = EnvelopeResponse<HighlightsData>;
+
+export interface GenerateHighlightsRequest {
+  suggestionIds: string[];
+  aspect: AspectRatio;
+}
+
+export type GenerateHighlightsResponse = EnvelopeResponse<ShortsClip[]>;
+
+

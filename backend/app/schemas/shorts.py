@@ -102,3 +102,47 @@ class TranscriptResponse(BaseModel):
     message: Optional[str] = None
     data: Optional[TranscriptData] = None
 
+
+class HighlightSuggestion(CamelModel):
+    id: str
+    start: float
+    end: float
+    title: str
+    reason: str
+    status: str = "suggested"
+
+
+class HighlightsData(CamelModel):
+    job_id: str
+    state: str = "none"
+    error_code: Optional[str] = None
+    suggestions: list[HighlightSuggestion] = Field(default_factory=list)
+    model_used: Optional[str] = None
+    transcript_truncated: bool = False
+
+
+class HighlightsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    data_state: DataState = Field(default="LIVE", serialization_alias="data_state")
+    last_synced_at: Optional[str] = Field(default=None, serialization_alias="last_synced_at")
+    message: Optional[str] = None
+    data: Optional[HighlightsData] = None
+
+
+class GenerateHighlightsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    suggestion_ids: list[str] = Field(..., alias="suggestionIds")
+    aspect: str = Field(default="vertical_9_16")
+
+
+class BatchClipResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    data_state: DataState = Field(default="LIVE", serialization_alias="data_state")
+    last_synced_at: Optional[str] = Field(default=None, serialization_alias="last_synced_at")
+    message: Optional[str] = None
+    data: list[ShortsClipData] = Field(default_factory=list)
+
+

@@ -10,6 +10,7 @@ import { ClipSettingsCard } from '../components/shorts/ClipSettingsCard';
 import { JobsList } from '../components/shorts/JobsList';
 import { ClipsGallery } from '../components/shorts/ClipsGallery';
 import { TranscriptPanel } from '../components/shorts/TranscriptPanel';
+import { HighlightsPanel } from '../components/shorts/HighlightsPanel';
 import {
   createClip,
   deleteClip,
@@ -18,7 +19,7 @@ import {
   listJobs,
   uploadJob,
 } from '../services/shortsService';
-import type { AspectRatio, ShortsJob } from '../types/shorts';
+import type { AspectRatio, ShortsClip, ShortsJob } from '../types/shorts';
 import { formatFileSize } from '../utils/shortsFormat';
 
 const MAX_CLIP_SECONDS = 180;
@@ -297,6 +298,23 @@ export const ShortsClipperPage: React.FC = () => {
     setTrimError(null);
   };
 
+  const handleClipsGenerated = (newClips: ShortsClip[]) => {
+    if (!activeJobId || newClips.length === 0) return;
+    setJobs((prev) =>
+      prev.map((j) => {
+        if (j.id === activeJobId) {
+          const existingIds = new Set(j.clips.map((c) => c.id));
+          const uniqueNew = newClips.filter((c) => !existingIds.has(c.id));
+          return {
+            ...j,
+            clips: [...uniqueNew, ...j.clips],
+          };
+        }
+        return j;
+      })
+    );
+  };
+
   // 503 Feature Disabled State
   if (isFeatureDisabled) {
     return (
@@ -398,6 +416,17 @@ export const ShortsClipperPage: React.FC = () => {
               jobId={activeJob.id}
               onSelectSegment={handleSelectTranscriptSegment}
               onSeek={handleSeekVideo}
+            />
+
+            <HighlightsPanel
+              jobId={activeJob.id}
+              onSeek={handleSeekVideo}
+              onApplyTrimmer={(start, end) => {
+                setStartSeconds(start);
+                setEndSeconds(end);
+                handleSeekVideo(start);
+              }}
+              onClipsGenerated={handleClipsGenerated}
             />
           </div>
 

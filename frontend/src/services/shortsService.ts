@@ -1,6 +1,10 @@
 import apiClient, { type NormalizedApiError } from './apiClient';
 import type {
   CreateClipRequest,
+  GenerateHighlightsRequest,
+  GenerateHighlightsResponse,
+  HighlightsData,
+  HighlightsResponse,
   ShortsClip,
   ShortsClipResponse,
   ShortsJob,
@@ -26,7 +30,16 @@ export const ERROR_MESSAGES: Record<string, string> = {
   TRANSCRIPTION_BUSY: 'Another transcription is currently in progress. Please wait.',
   NO_AUDIO_STREAM: 'Video does not contain an audio stream to transcribe.',
   MODEL_DOWNLOAD_FAILED: 'Failed to download speech recognition model. Please check your internet connection.',
-  INTERRUPTED: 'Transcription was interrupted. Please retry.',
+  INTERRUPTED: 'Process was interrupted by a previous server restart. Please retry.',
+  AI_NOT_CONFIGURED: 'AI is not configured on this server.',
+  AI_AUTH_FAILED: 'AI authentication failed. Please verify provider credentials.',
+  AI_RATE_LIMITED: 'AI service rate limit reached. Please try again shortly.',
+  AI_TIMEOUT: 'AI request timed out. Please try again.',
+  AI_UNAVAILABLE: 'AI service is currently unavailable. Please try again.',
+  AI_BAD_RESPONSE: 'AI returned an invalid response. Please retry.',
+  TRANSCRIPT_REQUIRED: 'A completed transcript is required before finding highlights.',
+  HIGHLIGHTS_BUSY: 'Another highlight analysis is currently in progress. Please wait.',
+  SUGGESTION_NOT_FOUND: 'One or more selected highlight suggestions were not found.',
 };
 
 export function getFriendlyErrorMessage(err: unknown): string {
@@ -170,5 +183,48 @@ export async function getTranscript(
   }
   return response.data.data;
 }
+
+export async function startHighlights(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<HighlightsData> {
+  const response = await apiClient.post<HighlightsResponse>(
+    `/shorts/jobs/${jobId}/highlights`,
+    {},
+    { signal }
+  );
+  if (!response.data.data) {
+    throw new Error('Highlights request succeeded but server returned empty data.');
+  }
+  return response.data.data;
+}
+
+export async function getHighlights(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<HighlightsData> {
+  const response = await apiClient.get<HighlightsResponse>(
+    `/shorts/jobs/${jobId}/highlights`,
+    { signal }
+  );
+  if (!response.data.data) {
+    throw new Error('Highlights request succeeded but server returned empty data.');
+  }
+  return response.data.data;
+}
+
+export async function generateHighlightClips(
+  jobId: string,
+  request: GenerateHighlightsRequest,
+  signal?: AbortSignal
+): Promise<ShortsClip[]> {
+  const response = await apiClient.post<GenerateHighlightsResponse>(
+    `/shorts/jobs/${jobId}/highlights/generate`,
+    request,
+    { signal }
+  );
+  return response.data.data || [];
+}
+
 
 

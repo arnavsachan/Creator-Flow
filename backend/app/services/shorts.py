@@ -25,6 +25,7 @@ from app.services.media import (
     safe_delete_storage_file,
     safe_resolve_storage_file,
 )
+from app.services.highlights import delete_highlight_files, get_highlights_path
 from app.services.transcription import delete_transcript_files
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,14 @@ def process_clip_task(clip_id: str, job_id: str, settings: Settings) -> None:
         db.close()
 
 
+def process_sequential_clips_task(clip_ids: list[str], job_id: str, settings: Settings) -> None:
+    """
+    Renders multiple clips sequentially one after another in a single background worker task.
+    """
+    for cid in clip_ids:
+        process_clip_task(clip_id=cid, job_id=job_id, settings=settings)
+
+
 def create_clip(
     job_id: str,
     req: CreateClipRequest,
@@ -300,6 +309,93 @@ def create_clip(
 
     background_tasks.add_task(process_clip_task, clip_id=clip_id, job_id=job.id, settings=settings)
     return clip
+
+
+def create_highlight_clips(
+    job_id: str,
+    suggestion_ids: list[str],
+    aspect: str,
+    db: Session,
+    settings: Settings,
+    background_tasks: BackgroundTasks,
+) -> list[ShortsClip]:
+    job = db.get(ShortsJob, job_id)
+    if not job:
+        raise MediaValidationError("JOB_NOT_FOUND")
+
+    if aspect not in ASPECT_RATIOS:
+        raise MediaValidationError("INVALID_ASPECT")
+
+    if not suggestion_ids:
+        return []
+
+    # Cap at HIGHLIGHT_MAX_SUGGESTIONS per request
+    ids_to_process = suggestion_ids[: settings.HIGHLIGHT_MAX_SUGGESTIONS]
+
+    storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+    highlights_file = get_highlights_path(storage_dir, job_id)
+    if not highlights_file.exists():
+        raise MediaValidationError("SUGGESTION_NOT_FOUND")
+
+    try:
+        with open(highlights_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        saved_suggestions = {s["id"]: s for s in data.get("suggestions", []) if "id" in s}
+    except Exception:
+        raise MediaValidationError("SUGGESTION_NOT_FOUND")
+
+    # Validate that all requested suggestion IDs exist
+    for sid in ids_to_process:
+        if sid not in saved_suggestions:
+            raise MediaValidationError("SUGGESTION_NOT_FOUND")
+
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    created_clips: list[ShortsClip] = []
+
+    for sid in ids_to_process:
+        sug = saved_suggestions[sid]
+        start_sec = float(sug["start"])
+        end_sec = float(sug["end"])
+
+        # Validate range
+        if start_sec < 0 or start_sec >= end_sec or end_sec > job.duration_seconds:
+            raise MediaValidationError("INVALID_RANGE")
+
+        clip_len = end_sec - start_sec
+        if clip_len > settings.SHORTS_MAX_CLIP_SECONDS:
+            raise MediaValidationError("INVALID_RANGE")
+
+        clip_id = str(uuid.uuid4())
+        output_path = (storage_dir / f"clip_{clip_id}.mp4").resolve()
+
+        clip = ShortsClip(
+            id=clip_id,
+            job_id=job.id,
+            start_seconds=start_sec,
+            end_seconds=end_sec,
+            aspect=aspect,
+            status="queued",
+            error_code=None,
+            output_path=str(output_path),
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(clip)
+        created_clips.append(clip)
+
+    db.commit()
+    for c in created_clips:
+        db.refresh(c)
+
+    # Queue sequential rendering in a single background worker task
+    clip_ids = [c.id for c in created_clips]
+    background_tasks.add_task(
+        process_sequential_clips_task,
+        clip_ids=clip_ids,
+        job_id=job.id,
+        settings=settings,
+    )
+
+    return created_clips
 
 
 def get_clip(job_id: str, clip_id: str, db: Session) -> ShortsClip:
@@ -362,6 +458,10 @@ def delete_job(job_id: str, db: Session, storage_dir: Path) -> None:
     # Delete transcript sidecar files and temporary audio
     delete_transcript_files(job_id, storage_dir)
 
+    # Delete highlight sidecar files
+    delete_highlight_files(job_id, storage_dir)
+
     db.delete(job)
     db.commit()
+
 

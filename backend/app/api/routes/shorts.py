@@ -17,9 +17,14 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+import json
 from app.db.session import get_db
 from app.schemas.shorts import (
+    BatchClipResponse,
     CreateClipRequest,
+    GenerateHighlightsRequest,
+    HighlightsData,
+    HighlightsResponse,
     ShortsClipResponse,
     ShortsDeleteResponse,
     ShortsJobListResponse,
@@ -27,18 +32,27 @@ from app.schemas.shorts import (
     TranscriptData,
     TranscriptResponse,
 )
+from app.services.highlights import (
+    acquire_highlights_lock,
+    get_highlights_data,
+    process_highlights_background,
+    write_highlights_state,
+)
 from app.services.media import MediaValidationError, safe_resolve_storage_file
 from app.services.transcription import (
     acquire_transcription_lock,
     get_transcript_data,
+    get_transcript_path,
     has_audio_stream,
     is_faster_whisper_available,
     process_transcription_background,
+    read_transcript_state,
     write_transcript_state,
 )
 from app.services.shorts import (
     clip_to_data,
     create_clip,
+    create_highlight_clips,
     delete_clip,
     delete_job,
     get_clip,
@@ -84,6 +98,15 @@ def _handle_media_error(err: MediaValidationError) -> HTTPException:
         "TRANSCRIPTION_UNAVAILABLE": status.HTTP_503_SERVICE_UNAVAILABLE,
         "NO_AUDIO_STREAM": status.HTTP_400_BAD_REQUEST,
         "MODEL_DOWNLOAD_FAILED": status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "AI_NOT_CONFIGURED": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "AI_AUTH_FAILED": status.HTTP_502_BAD_GATEWAY,
+        "AI_RATE_LIMITED": status.HTTP_429_TOO_MANY_REQUESTS,
+        "AI_TIMEOUT": status.HTTP_504_GATEWAY_TIMEOUT,
+        "AI_UNAVAILABLE": status.HTTP_502_BAD_GATEWAY,
+        "AI_BAD_RESPONSE": status.HTTP_502_BAD_GATEWAY,
+        "TRANSCRIPT_REQUIRED": status.HTTP_409_CONFLICT,
+        "HIGHLIGHTS_BUSY": status.HTTP_409_CONFLICT,
+        "SUGGESTION_NOT_FOUND": status.HTTP_404_NOT_FOUND,
     }
     http_status = status_map.get(err.code, status.HTTP_400_BAD_REQUEST)
     return HTTPException(status_code=http_status, detail=err.code)
@@ -366,5 +389,122 @@ def get_transcript_endpoint(
         )
     except MediaValidationError as err:
         raise _handle_media_error(err) from err
+
+
+@router.post(
+    "/jobs/{id}/highlights",
+    response_model=HighlightsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start AI Highlight Analysis for Job",
+)
+def start_highlights_endpoint(
+    id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> HighlightsResponse:
+    try:
+        job = get_job(job_id=id, db=db)
+
+        # Check AI configuration (never echo or expose key)
+        api_key = settings.GEMINI_API_KEY.strip() if settings.GEMINI_API_KEY else ""
+        model = settings.AI_MODEL.strip() if settings.AI_MODEL else ""
+        if not api_key or not model or settings.AI_PROVIDER != "gemini":
+            raise MediaValidationError("AI_NOT_CONFIGURED")
+
+        # Check completed transcript exists with segments
+        storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+        transcript_state, _ = read_transcript_state(storage_dir, id)
+        if transcript_state != "done":
+            raise MediaValidationError("TRANSCRIPT_REQUIRED")
+
+        transcript_path = get_transcript_path(storage_dir, id)
+        if not transcript_path.exists():
+            raise MediaValidationError("TRANSCRIPT_REQUIRED")
+
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                t_json = json.load(f)
+            if not t_json.get("segments"):
+                raise MediaValidationError("TRANSCRIPT_REQUIRED")
+        except Exception:
+            raise MediaValidationError("TRANSCRIPT_REQUIRED")
+
+        if not acquire_highlights_lock(id):
+            raise MediaValidationError("HIGHLIGHTS_BUSY")
+
+        write_highlights_state(storage_dir, id, "running")
+
+        background_tasks.add_task(
+            process_highlights_background,
+            job_id=id,
+            settings=settings,
+        )
+
+        return HighlightsResponse(
+            data_state="LIVE",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            message="Highlights analysis started.",
+            data=HighlightsData(job_id=id, state="running"),
+        )
+    except MediaValidationError as err:
+        raise _handle_media_error(err) from err
+
+
+@router.get(
+    "/jobs/{id}/highlights",
+    response_model=HighlightsResponse,
+    summary="Get AI Highlight Suggestions for Job",
+)
+def get_highlights_endpoint(
+    id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> HighlightsResponse:
+    try:
+        get_job(job_id=id, db=db)
+        storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+        data = get_highlights_data(job_id=id, storage_dir=storage_dir)
+
+        return HighlightsResponse(
+            data_state="LIVE",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            data=data,
+        )
+    except MediaValidationError as err:
+        raise _handle_media_error(err) from err
+
+
+@router.post(
+    "/jobs/{id}/highlights/generate",
+    response_model=BatchClipResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Generate Clips from Selected Highlight Suggestions Sequentially",
+)
+def generate_highlights_endpoint(
+    id: str,
+    req: GenerateHighlightsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> BatchClipResponse:
+    try:
+        clips = create_highlight_clips(
+            job_id=id,
+            suggestion_ids=req.suggestion_ids,
+            aspect=req.aspect,
+            db=db,
+            settings=settings,
+            background_tasks=background_tasks,
+        )
+        return BatchClipResponse(
+            data_state="LIVE",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            message=f"Queued {len(clips)} clip(s) for rendering.",
+            data=[clip_to_data(c) for c in clips],
+        )
+    except MediaValidationError as err:
+        raise _handle_media_error(err) from err
+
 
 

@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     )
     TRANSCRIBE_MAX_SECONDS: int = 600
     WHISPER_MODEL_DIR: Path = BACKEND_DIR / "storage" / "models"
+    AI_PROVIDER: str = "gemini"
+    GEMINI_API_KEY: str = ""
+    AI_MODEL: str = ""
+    AI_REQUEST_TIMEOUT_SECONDS: int = 60
+    HIGHLIGHT_MIN_SECONDS: int = 15
+    HIGHLIGHT_MAX_SECONDS: int = 60
+    HIGHLIGHT_MAX_SUGGESTIONS: int = 5
 
     @field_validator("SHORTS_STORAGE_DIR", mode="before")
     @classmethod
@@ -168,6 +175,85 @@ class Settings(BaseSettings):
             return val if val > 0 else 600
         except (ValueError, TypeError):
             return 600
+
+    @field_validator("AI_PROVIDER", mode="before")
+    @classmethod
+    def parse_ai_provider(cls, v: Any) -> str:
+        if v is None:
+            return "gemini"
+        v_str = str(v).strip().lower()
+        if not v_str:
+            return "gemini"
+        if v_str != "gemini":
+            raise ValueError(f"Unsupported AI_PROVIDER: '{v}'. Only 'gemini' is supported.")
+        return "gemini"
+
+    @field_validator("GEMINI_API_KEY", mode="before")
+    @classmethod
+    def parse_gemini_api_key(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @field_validator("AI_MODEL", mode="before")
+    @classmethod
+    def parse_ai_model(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @field_validator("AI_REQUEST_TIMEOUT_SECONDS", mode="before")
+    @classmethod
+    def parse_ai_request_timeout_seconds(cls, v: Any) -> int:
+        if v is None:
+            return 60
+        if isinstance(v, str) and not v.strip():
+            return 60
+        try:
+            val = int(v)
+            return val if val >= 5 else 60
+        except (ValueError, TypeError):
+            return 60
+
+    @field_validator("HIGHLIGHT_MIN_SECONDS", mode="before")
+    @classmethod
+    def parse_highlight_min_seconds(cls, v: Any) -> int:
+        if v is None:
+            return 15
+        if isinstance(v, str) and not v.strip():
+            return 15
+        try:
+            val = int(v)
+            return val if val >= 1 else 15
+        except (ValueError, TypeError):
+            return 15
+
+    @field_validator("HIGHLIGHT_MAX_SECONDS", mode="before")
+    @classmethod
+    def parse_highlight_max_seconds(cls, v: Any) -> int:
+        if v is None:
+            return 60
+        if isinstance(v, str) and not v.strip():
+            return 60
+        try:
+            val = int(v)
+            # Enforce between 1 and 180s hard limit
+            return min(180, max(1, val))
+        except (ValueError, TypeError):
+            return 60
+
+    @field_validator("HIGHLIGHT_MAX_SUGGESTIONS", mode="before")
+    @classmethod
+    def parse_highlight_max_suggestions(cls, v: Any) -> int:
+        if v is None:
+            return 5
+        if isinstance(v, str) and not v.strip():
+            return 5
+        try:
+            val = int(v)
+            return val if val >= 1 else 5
+        except (ValueError, TypeError):
+            return 5
 
     @field_validator("SHORTS_ENABLED_ENVIRONMENTS", mode="before")
     @classmethod
