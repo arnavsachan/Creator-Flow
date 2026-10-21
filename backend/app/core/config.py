@@ -37,6 +37,13 @@ class Settings(BaseSettings):
         "development",
         "test",
     ]
+    WHISPER_MODEL_SIZE: str = "medium"
+    WHISPER_DEVICE: str = "auto"
+    WHISPER_COMPUTE_TYPE: str = "auto"
+    WHISPER_CPU_THREADS: int = 4
+    WHISPER_LANGUAGE: str = ""
+    TRANSCRIBE_MAX_SECONDS: int = 600
+    WHISPER_MODEL_DIR: Path = BACKEND_DIR / "storage" / "models"
 
     @field_validator("SHORTS_STORAGE_DIR", mode="before")
     @classmethod
@@ -56,6 +63,93 @@ class Settings(BaseSettings):
                 return (BACKEND_DIR / v).resolve()
             return v.resolve()
         return (BACKEND_DIR / "storage" / "shorts").resolve()
+
+    @field_validator("WHISPER_MODEL_DIR", mode="before")
+    @classmethod
+    def parse_whisper_model_dir(cls, v: Any) -> Path:
+        default_dir = (BACKEND_DIR / "storage" / "models").resolve()
+        if v is None:
+            return default_dir
+        if isinstance(v, str):
+            v_stripped = v.strip()
+            if not v_stripped:
+                return default_dir
+            p = Path(v_stripped)
+            if not p.is_absolute():
+                return (BACKEND_DIR / p).resolve()
+            return p.resolve()
+        if isinstance(v, Path):
+            if not v.is_absolute():
+                return (BACKEND_DIR / v).resolve()
+            return v.resolve()
+        return default_dir
+
+    @field_validator("WHISPER_MODEL_SIZE", mode="before")
+    @classmethod
+    def parse_whisper_model_size(cls, v: Any) -> str:
+        if v is None:
+            return "medium"
+        v_str = str(v).strip().lower()
+        if not v_str:
+            return "medium"
+        allowed = {"tiny", "base", "small", "medium", "large-v3"}
+        if v_str not in allowed:
+            raise ValueError(f"Invalid WHISPER_MODEL_SIZE: '{v}'. Allowed: {', '.join(sorted(allowed))}")
+        return v_str
+
+    @field_validator("WHISPER_DEVICE", mode="before")
+    @classmethod
+    def parse_whisper_device(cls, v: Any) -> str:
+        if v is None:
+            return "auto"
+        v_str = str(v).strip().lower()
+        if not v_str:
+            return "auto"
+        allowed = {"auto", "cuda", "cpu"}
+        if v_str not in allowed:
+            raise ValueError(f"Invalid WHISPER_DEVICE: '{v}'. Allowed: {', '.join(sorted(allowed))}")
+        return v_str
+
+    @field_validator("WHISPER_COMPUTE_TYPE", mode="before")
+    @classmethod
+    def parse_whisper_compute_type(cls, v: Any) -> str:
+        if v is None:
+            return "auto"
+        v_str = str(v).strip().lower()
+        return v_str if v_str else "auto"
+
+    @field_validator("WHISPER_CPU_THREADS", mode="before")
+    @classmethod
+    def parse_whisper_cpu_threads(cls, v: Any) -> int:
+        if v is None:
+            return 4
+        if isinstance(v, str) and not v.strip():
+            return 4
+        try:
+            val = int(v)
+            return val if val >= 1 else 4
+        except (ValueError, TypeError):
+            return 4
+
+    @field_validator("WHISPER_LANGUAGE", mode="before")
+    @classmethod
+    def parse_whisper_language(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @field_validator("TRANSCRIBE_MAX_SECONDS", mode="before")
+    @classmethod
+    def parse_transcribe_max_seconds(cls, v: Any) -> int:
+        if v is None:
+            return 600
+        if isinstance(v, str) and not v.strip():
+            return 600
+        try:
+            val = int(v)
+            return val if val > 0 else 600
+        except (ValueError, TypeError):
+            return 600
 
     @field_validator("SHORTS_ENABLED_ENVIRONMENTS", mode="before")
     @classmethod

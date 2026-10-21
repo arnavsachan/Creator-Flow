@@ -9,6 +9,7 @@ import { TimelineTrimmer } from '../components/shorts/TimelineTrimmer';
 import { ClipSettingsCard } from '../components/shorts/ClipSettingsCard';
 import { JobsList } from '../components/shorts/JobsList';
 import { ClipsGallery } from '../components/shorts/ClipsGallery';
+import { TranscriptPanel } from '../components/shorts/TranscriptPanel';
 import {
   createClip,
   deleteClip,
@@ -284,6 +285,18 @@ export const ShortsClipperPage: React.FC = () => {
     }
   };
 
+  const handleSelectTranscriptSegment = (start: number, end: number) => {
+    if (!activeJob) return;
+    const safeStart = Math.max(0, Math.min(start, activeJob.durationSeconds));
+    const segmentDuration = Math.max(0.5, end - start);
+    const clampedLength = Math.min(segmentDuration, MAX_CLIP_SECONDS);
+    const safeEnd = Math.min(activeJob.durationSeconds, safeStart + clampedLength);
+
+    setStartSeconds(parseFloat(safeStart.toFixed(2)));
+    setEndSeconds(parseFloat(safeEnd.toFixed(2)));
+    setTrimError(null);
+  };
+
   // 503 Feature Disabled State
   if (isFeatureDisabled) {
     return (
@@ -379,6 +392,12 @@ export const ShortsClipperPage: React.FC = () => {
               onSetEndToCurrent={setEndFromCurrentVideoTime}
               onSeek={handleSeekVideo}
               validationError={validationError || trimError}
+            />
+
+            <TranscriptPanel
+              jobId={activeJob.id}
+              onSelectSegment={handleSelectTranscriptSegment}
+              onSeek={handleSeekVideo}
             />
           </div>
 

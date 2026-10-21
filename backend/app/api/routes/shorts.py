@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import (
@@ -23,8 +24,18 @@ from app.schemas.shorts import (
     ShortsDeleteResponse,
     ShortsJobListResponse,
     ShortsJobResponse,
+    TranscriptData,
+    TranscriptResponse,
 )
 from app.services.media import MediaValidationError, safe_resolve_storage_file
+from app.services.transcription import (
+    acquire_transcription_lock,
+    get_transcript_data,
+    has_audio_stream,
+    is_faster_whisper_available,
+    process_transcription_background,
+    write_transcript_state,
+)
 from app.services.shorts import (
     clip_to_data,
     create_clip,
@@ -69,6 +80,10 @@ def _handle_media_error(err: MediaValidationError) -> HTTPException:
         "INVALID_ASPECT": status.HTTP_400_BAD_REQUEST,
         "DURATION_EXCEEDED": status.HTTP_400_BAD_REQUEST,
         "INVALID_RANGE": status.HTTP_400_BAD_REQUEST,
+        "TRANSCRIPTION_BUSY": status.HTTP_409_CONFLICT,
+        "TRANSCRIPTION_UNAVAILABLE": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "NO_AUDIO_STREAM": status.HTTP_400_BAD_REQUEST,
+        "MODEL_DOWNLOAD_FAILED": status.HTTP_500_INTERNAL_SERVER_ERROR,
     }
     http_status = status_map.get(err.code, status.HTTP_400_BAD_REQUEST)
     return HTTPException(status_code=http_status, detail=err.code)
@@ -280,4 +295,76 @@ def delete_clip_endpoint(
         )
     except MediaValidationError as err:
         raise _handle_media_error(err) from err
+
+
+@router.post(
+    "/jobs/{id}/transcribe",
+    response_model=TranscriptResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start Local Speech Transcription for Job",
+)
+def transcribe_job_endpoint(
+    id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TranscriptResponse:
+    try:
+        job = get_job(job_id=id, db=db)
+        if not is_faster_whisper_available():
+            raise MediaValidationError("TRANSCRIPTION_UNAVAILABLE")
+
+        storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+        video_path = safe_resolve_storage_file(job.stored_path, storage_dir)
+
+        if not has_audio_stream(video_path, ffprobe_bin=settings.FFPROBE_BIN):
+            write_transcript_state(storage_dir, id, "failed", "NO_AUDIO_STREAM")
+            raise MediaValidationError("NO_AUDIO_STREAM")
+
+        if not acquire_transcription_lock(id):
+            raise MediaValidationError("TRANSCRIPTION_BUSY")
+
+        write_transcript_state(storage_dir, id, "running")
+
+        background_tasks.add_task(
+            process_transcription_background,
+            job_id=id,
+            stored_video_path_str=job.stored_path,
+            duration_seconds=job.duration_seconds,
+            settings=settings,
+        )
+
+        return TranscriptResponse(
+            data_state="LIVE",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            message="Transcription started.",
+            data=TranscriptData(job_id=id, state="running"),
+        )
+    except MediaValidationError as err:
+        raise _handle_media_error(err) from err
+
+
+@router.get(
+    "/jobs/{id}/transcript",
+    response_model=TranscriptResponse,
+    summary="Get Speech Transcription for Job",
+)
+def get_transcript_endpoint(
+    id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TranscriptResponse:
+    try:
+        get_job(job_id=id, db=db)
+        storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+        data = get_transcript_data(job_id=id, storage_dir=storage_dir)
+
+        return TranscriptResponse(
+            data_state="LIVE",
+            last_synced_at=datetime.now(timezone.utc).isoformat(),
+            data=data,
+        )
+    except MediaValidationError as err:
+        raise _handle_media_error(err) from err
+
 

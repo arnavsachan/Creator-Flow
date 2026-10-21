@@ -44,3 +44,26 @@ export interface CreateClipRequest {
 export type ShortsJobResponse = EnvelopeResponse<ShortsJob>;
 export type ShortsJobListResponse = EnvelopeResponse<ShortsJob[]>;
 export type ShortsClipResponse = EnvelopeResponse<ShortsClip>;
+
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export type TranscriptState = 'none' | 'running' | 'done' | 'failed' | 'unavailable';
+
+export interface TranscriptData {
+  jobId: string;
+  state: TranscriptState;
+  errorCode: string | null;
+  segments: TranscriptSegment[];
+  languageDetected: string | null;
+  durationCoveredSeconds: number | null;
+  truncated: boolean;
+  modelSize: string | null;
+  deviceUsed: string | null;
+}
+
+export type TranscriptResponse = EnvelopeResponse<TranscriptData>;
+

@@ -25,6 +25,7 @@ from app.services.media import (
     safe_delete_storage_file,
     safe_resolve_storage_file,
 )
+from app.services.transcription import delete_transcript_files
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +358,9 @@ def delete_job(job_id: str, db: Session, storage_dir: Path) -> None:
     # Delete source video file
     if job.stored_path:
         safe_delete_storage_file(job.stored_path, storage_dir)
+
+    # Delete transcript sidecar files and temporary audio
+    delete_transcript_files(job_id, storage_dir)
 
     db.delete(job)
     db.commit()

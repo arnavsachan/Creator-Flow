@@ -74,3 +74,31 @@ class ShortsDeleteResponse(BaseModel):
     last_synced_at: Optional[str] = Field(default=None, serialization_alias="last_synced_at")
     message: str = "Job deleted successfully."
     data: Optional[dict] = None
+
+
+class TranscriptSegment(CamelModel):
+    start: float
+    end: float
+    text: str
+
+
+class TranscriptData(CamelModel):
+    job_id: str
+    state: str = "none"
+    error_code: Optional[str] = None
+    segments: list[TranscriptSegment] = Field(default_factory=list)
+    language_detected: Optional[str] = None
+    duration_covered_seconds: Optional[float] = None
+    truncated: bool = False
+    model_size: Optional[str] = None
+    device_used: Optional[str] = None
+
+
+class TranscriptResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    data_state: DataState = Field(default="LIVE", serialization_alias="data_state")
+    last_synced_at: Optional[str] = Field(default=None, serialization_alias="last_synced_at")
+    message: Optional[str] = None
+    data: Optional[TranscriptData] = None
+

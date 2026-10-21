@@ -6,6 +6,8 @@ import type {
   ShortsJob,
   ShortsJobListResponse,
   ShortsJobResponse,
+  TranscriptData,
+  TranscriptResponse,
 } from '../types/shorts';
 
 export const ERROR_MESSAGES: Record<string, string> = {
@@ -20,6 +22,11 @@ export const ERROR_MESSAGES: Record<string, string> = {
   CLIP_BUSY: 'Wait until this clip finishes processing before deleting.',
   INVALID_ASPECT: 'Invalid output aspect ratio selected.',
   FEATURE_DISABLED: 'Shorts Clipper is disabled in this environment.',
+  TRANSCRIPTION_UNAVAILABLE: 'Local speech transcription package is not installed on this machine.',
+  TRANSCRIPTION_BUSY: 'Another transcription is currently in progress. Please wait.',
+  NO_AUDIO_STREAM: 'Video does not contain an audio stream to transcribe.',
+  MODEL_DOWNLOAD_FAILED: 'Failed to download speech recognition model. Please check your internet connection.',
+  INTERRUPTED: 'Transcription was interrupted. Please retry.',
 };
 
 export function getFriendlyErrorMessage(err: unknown): string {
@@ -134,4 +141,34 @@ export async function deleteClip(
 ): Promise<void> {
   await apiClient.delete(`/shorts/jobs/${jobId}/clips/${clipId}`, { signal });
 }
+
+export async function startTranscription(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<TranscriptData> {
+  const response = await apiClient.post<TranscriptResponse>(
+    `/shorts/jobs/${jobId}/transcribe`,
+    {},
+    { signal }
+  );
+  if (!response.data.data) {
+    throw new Error('Transcription start succeeded but server returned empty data.');
+  }
+  return response.data.data;
+}
+
+export async function getTranscript(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<TranscriptData> {
+  const response = await apiClient.get<TranscriptResponse>(
+    `/shorts/jobs/${jobId}/transcript`,
+    { signal }
+  );
+  if (!response.data.data) {
+    throw new Error('Transcript request succeeded but server returned empty data.');
+  }
+  return response.data.data;
+}
+
 
