@@ -1,17 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, Clock, Globe2, Heart, Loader2, Tv, UserCheck, Users, Video } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, ExternalLink, Globe2, Heart, Loader2, Sparkles, Tv, UserCheck, Users, Video } from 'lucide-react';
 import { useAppMode } from '../context/AppModeContext';
-import { getChannelAudience } from '../services/youtubeService';
+import { getChannelAudience, startOAuth } from '../services/youtubeService';
 import { dashboardSync } from '../services/dashboardSync';
 import { ErrorState } from '../components/states/ErrorState';
 import type { AudienceTelemetryResponse } from '../types/youtube';
 
 export const AudiencePage: React.FC = () => {
   const { selectedChannelId } = useAppMode();
+  const [selectedPeriod, setSelectedPeriod] = useState('28d');
   const [data, setData] = useState<AudienceTelemetryResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [authorizing, setAuthorizing] = useState<boolean>(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState<number>(0);
+
+  const days = parseInt(selectedPeriod, 10) || 28;
 
   // Subscribe to global sync events
   useEffect(() => {
@@ -26,7 +30,7 @@ export const AudiencePage: React.FC = () => {
     setLoading(true);
     setApiError(null);
 
-    getChannelAudience(selectedChannelId)
+    getChannelAudience(selectedChannelId, days)
       .then((res) => {
         if (!ignore) {
           setData(res);
@@ -44,7 +48,24 @@ export const AudiencePage: React.FC = () => {
     return () => {
       ignore = true;
     };
-  }, [selectedChannelId, refreshKey]);
+  }, [selectedChannelId, days, refreshKey]);
+
+  const handleAuthorizeAnalytics = async () => {
+    setAuthorizing(true);
+    try {
+      if (data?.authorizationUrl) {
+        window.location.href = data.authorizationUrl;
+        return;
+      }
+      const res = await startOAuth({ includeAnalytics: true });
+      if (res.authorizationUrl) {
+        window.location.href = res.authorizationUrl;
+      }
+    } catch (err) {
+      console.error('[AudiencePage] Failed to start analytics authorization:', err);
+      setAuthorizing(false);
+    }
+  };
 
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
@@ -64,12 +85,35 @@ export const AudiencePage: React.FC = () => {
                 DEMO / SAMPLE DATA
               </span>
             )}
+            {data?.analyticsVerified && data?.isLive && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-950 text-indigo-400 border border-indigo-800/80 flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3 text-indigo-400" />
+                <span>ANALYTICS API VERIFIED</span>
+              </span>
+            )}
           </div>
           <p className="text-xs text-zinc-400 mt-0.5">
             {data?.title
               ? `Audience scale and demographic telemetry for ${data.title}`
               : 'Audience loyalty indices, active time windows, and geographic distribution.'}
           </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center bg-[#141418] border border-zinc-800 rounded-md p-0.5 text-xs">
+            {['7d', '28d', '90d'].map((p) => (
+              <button
+                key={p}
+                onClick={() => setSelectedPeriod(p)}
+                type="button"
+                className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
+                  selectedPeriod === p ? 'bg-zinc-800 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -138,7 +182,69 @@ export const AudiencePage: React.FC = () => {
             </div>
           </div>
 
-          {/* Scope Limitation Disclosure for Live Channels */}
+          {/* Google Cloud API Disabled Notice Banner */}
+          {data?.analyticsError === 'SERVICE_DISABLED' && (
+            <div
+              className="p-4 rounded-lg bg-amber-950/40 border border-amber-800/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-amber-200"
+              data-testid="api-disabled-audience-banner"
+            >
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold text-amber-100">
+                    Google Cloud Action Required: YouTube Analytics API Disabled
+                  </div>
+                  <p className="text-xs text-amber-300 leading-relaxed">
+                    OAuth scope authorization succeeded, but the <strong>YouTube Analytics API</strong> is not enabled in Google Cloud Project <code>198142014140</code>.
+                    Enable it in the Google Cloud Console to activate live geography and viewer demographics.
+                  </p>
+                </div>
+              </div>
+              <a
+                href="https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 px-3.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span>Enable in Google Cloud</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          )}
+
+          {/* Optional Scope Upgrade Banner for Live Channels without Analytics Scope */}
+          {data?.isLive && !data?.hasAnalyticsScope && (
+            <div
+              className="p-4 rounded-lg bg-indigo-950/40 border border-indigo-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-zinc-300"
+              data-testid="authorize-audience-banner"
+            >
+              <div className="flex items-start gap-3">
+                <Sparkles className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold text-zinc-100">
+                    Unlock Geographic & Demographic Telemetry
+                  </div>
+                  <p className="text-xs text-zinc-400 leading-relaxed">
+                    Territory distribution and viewer cohorts require the{' '}
+                    <code className="text-indigo-300 font-mono text-[11px]">yt-analytics.readonly</code> OAuth scope.
+                    Authorize analytics to view country-level audience concentration.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleAuthorizeAnalytics}
+                disabled={authorizing}
+                data-testid="authorize-audience-button"
+                className="shrink-0 px-3.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {authorizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                <span>{authorizing ? 'Connecting...' : 'Authorize Analytics'}</span>
+              </button>
+            </div>
+          )}
+
+          {/* Scope Limitation Notice */}
           {data?.scopeLimitationNotice && (
             <div className="p-4 rounded-lg bg-zinc-900/60 border border-zinc-800 flex items-start gap-3 text-zinc-300">
               <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
@@ -163,8 +269,11 @@ export const AudiencePage: React.FC = () => {
               <div className="text-2xl font-semibold text-zinc-50 font-mono">
                 {data?.returningViewersRate ?? 'Unavailable'}
               </div>
-              <p className="text-[11px] text-zinc-400 font-sans">
-                {data?.returningViewersRate ? '+4.1% loyalty increase' : 'Requires YouTube Analytics API'}
+              <p className="text-[11px] text-zinc-400 font-sans" title={data?.returningViewersNotice || undefined}>
+                {data?.returningViewersNotice ||
+                  (data?.returningViewersRate && data.returningViewersRate !== 'Unavailable'
+                    ? '+4.1% loyalty increase'
+                    : 'Not exposed by public YouTube Analytics API (Studio-only)')}
               </p>
             </div>
 
@@ -174,10 +283,13 @@ export const AudiencePage: React.FC = () => {
                 <Heart className="w-4 h-4 text-zinc-500" />
               </div>
               <div className="text-2xl font-semibold text-zinc-50 font-mono">
-                {data?.subscriberConversionRate ?? 'Unavailable'}
+                {data?.subscriberConversionRate ?? (data?.subscriberConversionState === 'NO_DATA' ? 'No Data' : 'Unavailable')}
               </div>
-              <p className="text-[11px] text-zinc-400 font-sans">
-                {data?.subscriberConversionRate ? 'Top 10% in Tech niche' : 'Requires YouTube Analytics API'}
+              <p className="text-[11px] text-zinc-400 font-sans" title={data?.subscriberConversionNotice || undefined}>
+                {data?.subscriberConversionNotice ||
+                  (data?.subscriberConversionRate && data.subscriberConversionRate !== 'Unavailable'
+                    ? 'Based on verified views & subscriber gains'
+                    : 'Requires YouTube Analytics API permissions')}
               </p>
             </div>
 
@@ -187,10 +299,13 @@ export const AudiencePage: React.FC = () => {
                 <Clock className="w-4 h-4 text-zinc-500" />
               </div>
               <div className="text-2xl font-semibold text-zinc-50 font-mono">
-                {data?.optimalReleaseWindow ?? 'Unavailable'}
+                {data?.optimalReleaseWindow ?? 'Insufficient Data'}
               </div>
-              <p className="text-[11px] text-zinc-400 font-sans">
-                {data?.optimalReleaseWindow ? 'Wednesdays & Thursdays' : 'Requires YouTube Analytics API'}
+              <p className="text-[11px] text-zinc-400 font-sans" title={data?.optimalReleaseWindowNotice || undefined}>
+                {data?.optimalReleaseWindowNotice ||
+                  (data?.optimalReleaseWindow && data.optimalReleaseWindow !== 'Insufficient Data' && data.optimalReleaseWindow !== 'Unavailable'
+                    ? 'Application heuristic based on historical upload performance'
+                    : 'Application heuristic requires ≥20 uploads across weekdays to estimate window')}
               </p>
             </div>
           </div>
@@ -202,12 +317,12 @@ export const AudiencePage: React.FC = () => {
                 <div className="text-xs font-medium uppercase tracking-wider text-zinc-400">
                   Geographic Concentration
                 </div>
-                <div className="text-xs text-zinc-500">Distribution of unique viewers by territory</div>
+                <div className="text-xs text-zinc-500">Distribution of viewers by territory ({selectedPeriod})</div>
               </div>
               <Globe2 className="w-4 h-4 text-zinc-500" />
             </div>
 
-            {data?.topCountries ? (
+            {data?.topCountries && data.topCountries.length > 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                 {data.topCountries.map((c) => (
                   <div key={c.country} className="p-3 rounded-md bg-[#09090B] border border-zinc-800 space-y-1 font-mono">
@@ -216,6 +331,21 @@ export const AudiencePage: React.FC = () => {
                     <div className="text-[11px] text-zinc-500">{c.viewers} viewers</div>
                   </div>
                 ))}
+              </div>
+            ) : data?.analyticsVerified ? (
+              <div className="py-8 text-center text-xs text-zinc-500 space-y-1">
+                <p>No viewer territory records returned for this period.</p>
+                <span className="text-[10px] text-zinc-600 font-mono block">
+                  Viewer volume by country may be below Google's privacy thresholds.
+                </span>
+              </div>
+            ) : data?.analyticsError === 'SERVICE_DISABLED' ? (
+              <div className="py-8 text-center text-xs text-amber-400/90 space-y-1">
+                <AlertCircle className="w-5 h-5 mx-auto text-amber-400 mb-1" />
+                <p>Viewer territory breakdown unavailable: API disabled in Google Cloud.</p>
+                <span className="text-[10px] text-zinc-500 font-mono block">
+                  Enable the YouTube Analytics API in Google Cloud Console.
+                </span>
               </div>
             ) : (
               <div className="py-8 text-center text-xs text-zinc-500 space-y-1">

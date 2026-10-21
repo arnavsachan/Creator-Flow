@@ -48,6 +48,12 @@ class ConnectedChannel(Base):
     scope: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     status: Mapped[str] = mapped_column(String(50), default="connected", nullable=False)
+
+    @property
+    def has_analytics_scope(self) -> bool:
+        if not self.scope:
+            return False
+        return "yt-analytics.readonly" in self.scope or "yt-analytics.monetary.readonly" in self.scope
     connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

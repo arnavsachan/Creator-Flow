@@ -20,6 +20,7 @@ class CamelModel(BaseModel):
 class OAuthStartResponse(CamelModel):
     authorization_url: str
     state: str
+    include_analytics: bool = False
 
 
 class OAuthCallbackRequest(BaseModel):
@@ -37,6 +38,7 @@ class ConnectedChannelResponse(CamelModel):
     video_count: int = 0
     view_count: int = 0
     status: str
+    has_analytics_scope: bool = False
     connected_at: datetime
     last_synced_at: datetime
 
@@ -61,13 +63,75 @@ class TrafficSourceItem(CamelModel):
     source: str
     views: int
     percentage: str
-    change: str
+    change: str = ""
 
 
 class RetentionPoint(CamelModel):
     timestamp: str
     long_form: float
     short_form: float
+
+
+class AnalyticsDayPoint(CamelModel):
+    date: str
+    views: int
+    estimated_minutes_watched: int
+    average_view_duration_seconds: int
+    subscribers_gained: int
+    subscribers_lost: int
+
+
+class AnalyticsOverviewReportResponse(CamelModel):
+    channel_id: str
+    data_state: str
+    is_live: bool
+    has_analytics_scope: bool
+    start_date: str
+    end_date: str
+    days: int
+    total_views: int
+    total_estimated_minutes_watched: int
+    average_view_duration_seconds: int
+    subscribers_gained: int = 0
+    subscribers_lost: int = 0
+    net_subscribers: int
+    time_series: list[AnalyticsDayPoint]
+    authorization_url: Optional[str] = None
+    message: Optional[str] = None
+
+
+class TrafficSourcesReportResponse(CamelModel):
+    channel_id: str
+    data_state: str
+    is_live: bool
+    has_analytics_scope: bool
+    start_date: str
+    end_date: str
+    days: int
+    total_views: int
+    traffic_sources: list[TrafficSourceItem]
+    authorization_url: Optional[str] = None
+    message: Optional[str] = None
+
+
+class GeographicViewerItem(CamelModel):
+    country: str
+    share: str
+    viewers: str
+
+
+class GeographicAudienceReportResponse(CamelModel):
+    channel_id: str
+    data_state: str
+    is_live: bool
+    has_analytics_scope: bool
+    start_date: str
+    end_date: str
+    days: int
+    total_views: int
+    top_countries: list[GeographicViewerItem]
+    authorization_url: Optional[str] = None
+    message: Optional[str] = None
 
 
 class AnalyticsTelemetryResponse(CamelModel):
@@ -78,15 +142,15 @@ class AnalyticsTelemetryResponse(CamelModel):
     total_views: int
     total_subscribers: int
     total_videos: int
+    has_analytics_scope: bool = False
+    analytics_verified: bool = False
+    analytics_error: Optional[str] = None
     traffic_sources: Optional[list[TrafficSourceItem]] = None
     retention_chart: Optional[list[RetentionPoint]] = None
+    time_series: Optional[list[AnalyticsDayPoint]] = None
+    scope_notice: Optional[str] = None
     scope_limitation_notice: Optional[str] = None
-
-
-class GeographicViewerItem(CamelModel):
-    country: str
-    share: str
-    viewers: str
+    authorization_url: Optional[str] = None
 
 
 class AudienceTelemetryResponse(CamelModel):
@@ -97,11 +161,23 @@ class AudienceTelemetryResponse(CamelModel):
     subscribers: int
     total_views: int
     uploads: int
+    days: Optional[int] = None
+    has_analytics_scope: bool = False
+    analytics_verified: bool = False
+    analytics_error: Optional[str] = None
     returning_viewers_rate: Optional[str] = None
+    returning_viewers_state: Optional[str] = None
+    returning_viewers_notice: Optional[str] = None
     subscriber_conversion_rate: Optional[str] = None
+    subscriber_conversion_state: Optional[str] = None
+    subscriber_conversion_notice: Optional[str] = None
     optimal_release_window: Optional[str] = None
+    optimal_release_window_state: Optional[str] = None
+    optimal_release_window_notice: Optional[str] = None
     top_countries: Optional[list[GeographicViewerItem]] = None
+    scope_notice: Optional[str] = None
     scope_limitation_notice: Optional[str] = None
+    authorization_url: Optional[str] = None
 
 
 class ChannelSnapshotItem(CamelModel):

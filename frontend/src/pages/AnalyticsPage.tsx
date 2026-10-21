@@ -8,9 +8,9 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { AlertCircle, Download, Eye, Filter, Loader2, Tv, Users, Video } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, ExternalLink, Eye, Filter, Loader2, Sparkles, Tv, Users, Video } from 'lucide-react';
 import { useAppMode } from '../context/AppModeContext';
-import { getChannelAnalytics } from '../services/youtubeService';
+import { getChannelAnalytics, startOAuth } from '../services/youtubeService';
 import { dashboardSync } from '../services/dashboardSync';
 import { ErrorState } from '../components/states/ErrorState';
 import type { AnalyticsTelemetryResponse } from '../types/youtube';
@@ -20,8 +20,11 @@ export const AnalyticsPage: React.FC = () => {
   const [selectedPeriod, setSelectedPeriod] = useState('28d');
   const [data, setData] = useState<AnalyticsTelemetryResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [authorizing, setAuthorizing] = useState<boolean>(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState<number>(0);
+
+  const days = parseInt(selectedPeriod, 10) || 28;
 
   // Subscribe to global sync events
   useEffect(() => {
@@ -36,7 +39,7 @@ export const AnalyticsPage: React.FC = () => {
     setLoading(true);
     setApiError(null);
 
-    getChannelAnalytics(selectedChannelId)
+    getChannelAnalytics(selectedChannelId, days)
       .then((res) => {
         if (!ignore) {
           setData(res);
@@ -54,7 +57,24 @@ export const AnalyticsPage: React.FC = () => {
     return () => {
       ignore = true;
     };
-  }, [selectedChannelId, refreshKey]);
+  }, [selectedChannelId, days, refreshKey]);
+
+  const handleAuthorizeAnalytics = async () => {
+    setAuthorizing(true);
+    try {
+      if (data?.authorizationUrl) {
+        window.location.href = data.authorizationUrl;
+        return;
+      }
+      const res = await startOAuth({ includeAnalytics: true });
+      if (res.authorizationUrl) {
+        window.location.href = res.authorizationUrl;
+      }
+    } catch (err) {
+      console.error('[AnalyticsPage] Failed to start analytics authorization:', err);
+      setAuthorizing(false);
+    }
+  };
 
   const handleExportCsv = () => {
     if (!data) return;
@@ -66,9 +86,20 @@ export const AnalyticsPage: React.FC = () => {
       ['Lifetime Views', data.totalViews.toString(), data.isLive ? 'YouTube Data API v3 (Verified)' : 'Simulated Sandbox', syncedTimestamp],
       ['Total Subscribers', data.totalSubscribers.toString(), data.isLive ? 'YouTube Data API v3 (Verified)' : 'Simulated Sandbox', syncedTimestamp],
       ['Public Uploads', data.totalVideos.toString(), data.isLive ? 'YouTube Data API v3 (Verified)' : 'Simulated Sandbox', syncedTimestamp],
-      ['Inbound Traffic Sources', 'Unavailable', 'Requires YouTube Analytics API (yt-analytics.readonly)', syncedTimestamp],
-      ['Audience Retention Curves', 'Unavailable', 'Requires YouTube Analytics API (yt-analytics.readonly)', syncedTimestamp],
     ];
+
+    if (data.hasAnalyticsScope && data.trafficSources && data.trafficSources.length > 0) {
+      data.trafficSources.forEach((ts) => {
+        rows.push([`Traffic Source: ${ts.source}`, `${ts.views} views (${ts.percentage})`, 'YouTube Analytics API v2 (Verified)', syncedTimestamp]);
+      });
+    } else {
+      rows.push([
+        'Inbound Traffic Sources',
+        data.hasAnalyticsScope ? 'No data for period' : 'Unavailable',
+        data.hasAnalyticsScope ? 'YouTube Analytics API v2' : 'Requires yt-analytics.readonly scope',
+        syncedTimestamp,
+      ]);
+    }
 
     const csvContent = 'data:text/csv;charset=utf-8,' + rows.map((e) => e.join(',')).join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -98,6 +129,12 @@ export const AnalyticsPage: React.FC = () => {
                 DEMO / SAMPLE DATA
               </span>
             )}
+            {data?.analyticsVerified && data?.isLive && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-950 text-indigo-400 border border-indigo-800/80 flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3 text-indigo-400" />
+                <span>ANALYTICS API VERIFIED</span>
+              </span>
+            )}
           </div>
           <p className="text-xs text-zinc-400 mt-0.5">
             {data?.title
@@ -105,7 +142,7 @@ export const AnalyticsPage: React.FC = () => {
               : 'Traffic discovery vectors, retention curves, and device distribution metrics.'}
             {data?.isLive && (
               <span className="text-zinc-500 block text-[11px] mt-0.5 font-mono">
-                Verified channel metrics shown • Lookback window ({selectedPeriod}) applies to granular telemetry when Analytics API reports are authorized.
+                Verified channel metrics shown • Lookback window ({selectedPeriod}) applied.
               </span>
             )}
           </p>
@@ -203,7 +240,69 @@ export const AnalyticsPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Scope Limitation Disclosure for Live Channels */}
+          {/* Google Cloud API Disabled Notice Banner */}
+          {data?.analyticsError === 'SERVICE_DISABLED' && (
+            <div
+              className="p-4 rounded-lg bg-amber-950/40 border border-amber-800/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-amber-200"
+              data-testid="api-disabled-banner"
+            >
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold text-amber-100">
+                    Google Cloud Action Required: YouTube Analytics API Disabled
+                  </div>
+                  <p className="text-xs text-amber-300 leading-relaxed">
+                    OAuth scope authorization succeeded, but the <strong>YouTube Analytics API</strong> is not enabled in Google Cloud Project <code>198142014140</code>.
+                    Enable it in the Google Cloud Console to activate live reports.
+                  </p>
+                </div>
+              </div>
+              <a
+                href="https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 px-3.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span>Enable in Google Cloud</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          )}
+
+          {/* Optional Scope Upgrade Banner for Live Channels without Analytics Scope */}
+          {data?.isLive && !data?.hasAnalyticsScope && (
+            <div
+              className="p-4 rounded-lg bg-indigo-950/40 border border-indigo-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-zinc-300"
+              data-testid="authorize-analytics-banner"
+            >
+              <div className="flex items-start gap-3">
+                <Sparkles className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold text-zinc-100">
+                    Unlock YouTube Analytics Reporting
+                  </div>
+                  <p className="text-xs text-zinc-400 leading-relaxed">
+                    Granular discovery vectors, daily view trajectories, and watch-time analytics require the{' '}
+                    <code className="text-indigo-300 font-mono text-[11px]">yt-analytics.readonly</code> OAuth scope.
+                    Authorize analytics to unlock verified reports.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleAuthorizeAnalytics}
+                disabled={authorizing}
+                data-testid="authorize-analytics-button"
+                className="shrink-0 px-3.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {authorizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                <span>{authorizing ? 'Connecting...' : 'Authorize Analytics'}</span>
+              </button>
+            </div>
+          )}
+
+          {/* Scope Limitation Notice */}
           {data?.scopeLimitationNotice && (
             <div className="p-4 rounded-lg bg-zinc-900/60 border border-zinc-800 flex items-start gap-3 text-zinc-300">
               <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
@@ -227,12 +326,12 @@ export const AnalyticsPage: React.FC = () => {
                   <div className="text-xs font-medium uppercase tracking-wider text-zinc-400">
                     Discovery Vectors
                   </div>
-                  <div className="text-xs text-zinc-500">Breakdown of inbound traffic algorithms</div>
+                  <div className="text-xs text-zinc-500">Breakdown of inbound traffic algorithms ({selectedPeriod})</div>
                 </div>
                 <Filter className="w-4 h-4 text-zinc-500" />
               </div>
 
-              {data?.trafficSources ? (
+              {data?.trafficSources && data.trafficSources.length > 0 ? (
                 <table className="w-full text-xs text-left">
                   <thead>
                     <tr className="border-b border-zinc-800 text-zinc-500 font-mono text-[10px] uppercase">
@@ -248,11 +347,35 @@ export const AnalyticsPage: React.FC = () => {
                         <td className="py-2.5 text-zinc-200 font-sans font-medium">{item.source}</td>
                         <td className="py-2.5 text-right text-zinc-300 tabular-nums">{item.views.toLocaleString()}</td>
                         <td className="py-2.5 text-right text-zinc-400 tabular-nums">{item.percentage}</td>
-                        <td className="py-2.5 text-right text-emerald-400 tabular-nums">{item.change}</td>
+                        <td className="py-2.5 text-right text-emerald-400 tabular-nums">{item.change || '—'}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              ) : data?.analyticsVerified ? (
+                <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
+                  <Tv className="w-6 h-6 mx-auto text-zinc-600" />
+                  <p>0 traffic source records returned for this period.</p>
+                  <span className="text-[10px] text-zinc-600 font-mono block">
+                    Data may be below Google's privacy aggregation thresholds.
+                  </span>
+                </div>
+              ) : data?.analyticsError === 'SERVICE_DISABLED' ? (
+                <div className="py-12 text-center text-xs text-amber-400/90 space-y-2">
+                  <AlertCircle className="w-6 h-6 mx-auto text-amber-400" />
+                  <p>Discovery vectors unavailable: API disabled in Google Cloud.</p>
+                  <span className="text-[10px] text-zinc-500 font-mono block">
+                    Enable the YouTube Analytics API in Google Cloud Console.
+                  </span>
+                </div>
+              ) : data?.hasAnalyticsScope ? (
+                <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
+                  <Tv className="w-6 h-6 mx-auto text-zinc-600" />
+                  <p>Traffic source data temporarily unavailable from upstream service.</p>
+                  <span className="text-[10px] text-zinc-600 font-mono block">
+                    Retry or check API quota status.
+                  </span>
+                </div>
               ) : (
                 <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
                   <Tv className="w-6 h-6 mx-auto text-zinc-600" />
@@ -264,16 +387,44 @@ export const AnalyticsPage: React.FC = () => {
               )}
             </div>
 
-            {/* Retention Curve Chart (6 cols) */}
+            {/* Retention Curve / Daily Performance Chart (6 cols) */}
             <div className="lg:col-span-6 p-5 rounded-lg bg-[#141418] border border-white/[0.06] space-y-4">
               <div>
                 <div className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-                  Audience Retention Decay Curve
+                  {data?.timeSeries && data.timeSeries.length > 0 ? 'Daily Views Performance' : 'Audience Retention Decay Curve'}
                 </div>
-                <div className="text-xs text-zinc-500">Long-form retention benchmark vs Shorts</div>
+                <div className="text-xs text-zinc-500">
+                  {data?.timeSeries && data.timeSeries.length > 0
+                    ? `Verified daily views over the last ${selectedPeriod}`
+                    : 'Long-form retention benchmark vs Shorts'}
+                </div>
               </div>
 
-              {data?.retentionChart ? (
+              {data?.timeSeries && data.timeSeries.length > 0 ? (
+                <div className="h-64 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={data.timeSeries} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#27272A" vertical={false} />
+                      <XAxis dataKey="date" stroke="#71717A" fontSize={10} tickLine={false} tickFormatter={(d) => d.slice(5)} />
+                      <YAxis stroke="#71717A" fontSize={11} tickLine={false} />
+                      <Tooltip
+                        content={({ active, payload, label }) => {
+                          if (active && payload && payload.length) {
+                            return (
+                              <div className="bg-[#141418] border border-zinc-800 p-2 rounded text-xs space-y-1">
+                                <div className="text-zinc-400 font-mono">{label}</div>
+                                <div className="text-indigo-400 font-mono">Views: {payload[0]?.value?.toLocaleString()}</div>
+                              </div>
+                            );
+                          }
+                          return null;
+                        }}
+                      />
+                      <Bar dataKey="views" fill="#6366F1" radius={[3, 3, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : data?.retentionChart ? (
                 <div className="h-64 w-full">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={data.retentionChart} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
@@ -299,10 +450,26 @@ export const AnalyticsPage: React.FC = () => {
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
+              ) : data?.analyticsVerified ? (
+                <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
+                  <div className="w-6 h-6 mx-auto text-zinc-600 font-mono font-bold">%</div>
+                  <p>0 daily performance records returned for this period.</p>
+                  <span className="text-[10px] text-zinc-600 font-mono block">
+                    No time-series analytics recorded for this channel during the requested period.
+                  </span>
+                </div>
+              ) : data?.analyticsError === 'SERVICE_DISABLED' ? (
+                <div className="py-12 text-center text-xs text-amber-400/90 space-y-2">
+                  <AlertCircle className="w-6 h-6 mx-auto text-amber-400" />
+                  <p>Daily performance unavailable: API disabled in Google Cloud.</p>
+                  <span className="text-[10px] text-zinc-500 font-mono block">
+                    Enable the YouTube Analytics API in Google Cloud Console.
+                  </span>
+                </div>
               ) : (
                 <div className="py-12 text-center text-xs text-zinc-500 space-y-2">
                   <div className="w-6 h-6 mx-auto text-zinc-600 font-mono font-bold">%</div>
-                  <p>Audience retention curves require YouTube Analytics Reporting API permissions.</p>
+                  <p>Daily performance metrics require YouTube Analytics Reporting API permissions.</p>
                   <span className="text-[10px] text-zinc-600 font-mono block">
                     Unavailable under standard youtube.readonly Data scope (subject to Google's privacy thresholds)
                   </span>

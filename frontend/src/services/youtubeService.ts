@@ -1,5 +1,6 @@
 import apiClient from './apiClient';
 import type {
+  AnalyticsOverviewReportResponse,
   AnalyticsTelemetryResponse,
   AudienceTelemetryResponse,
   ChannelHistoryResponse,
@@ -7,7 +8,9 @@ import type {
   ConnectedChannel,
   ConnectionStatusResponse,
   DisconnectResponse,
+  GeographicAudienceReportResponse,
   OAuthStartResponse,
+  TrafficSourcesReportResponse,
 } from '../types/youtube';
 
 /**
@@ -38,10 +41,16 @@ export async function getConnectionStatus(signal?: AbortSignal): Promise<Connect
 
 /**
  * Initiates the YouTube OAuth flow and returns the Google authorization URL.
+ * If includeAnalytics is true, requests the yt-analytics.readonly scope.
  */
-export async function startOAuth(signal?: AbortSignal): Promise<OAuthStartResponse> {
+export async function startOAuth(
+  options?: { includeAnalytics?: boolean },
+  signal?: AbortSignal
+): Promise<OAuthStartResponse> {
   await ensureAuthenticatedSession();
+  const params = options?.includeAnalytics ? { include_analytics: true } : undefined;
   const response = await apiClient.get<OAuthStartResponse>('/youtube/oauth/start', {
+    params,
     signal,
   });
   return response.data;
@@ -70,10 +79,14 @@ export async function syncChannel(signal?: AbortSignal): Promise<ConnectedChanne
  */
 export async function getChannelAnalytics(
   channelId?: string,
+  days: number = 28,
   signal?: AbortSignal
 ): Promise<AnalyticsTelemetryResponse> {
   await ensureAuthenticatedSession();
-  const params = channelId ? { channel_id: channelId } : undefined;
+  const params: Record<string, string | number> = { days };
+  if (channelId) {
+    params.channel_id = channelId;
+  }
   const response = await apiClient.get<AnalyticsTelemetryResponse>('/youtube/analytics', {
     params,
     signal,
@@ -86,10 +99,14 @@ export async function getChannelAnalytics(
  */
 export async function getChannelAudience(
   channelId?: string,
+  days: number = 28,
   signal?: AbortSignal
 ): Promise<AudienceTelemetryResponse> {
   await ensureAuthenticatedSession();
-  const params = channelId ? { channel_id: channelId } : undefined;
+  const params: Record<string, string | number> = { days };
+  if (channelId) {
+    params.channel_id = channelId;
+  }
   const response = await apiClient.get<AudienceTelemetryResponse>('/youtube/audience', {
     params,
     signal,
@@ -137,6 +154,66 @@ export async function getChannelVideos(
   return response.data;
 }
 
+/**
+ * Fetches daily time-series report from YouTube Analytics API.
+ */
+export async function getAnalyticsOverview(
+  channelId?: string,
+  days: number = 28,
+  signal?: AbortSignal
+): Promise<AnalyticsOverviewReportResponse> {
+  await ensureAuthenticatedSession();
+  const params: Record<string, string | number> = { days };
+  if (channelId) {
+    params.channel_id = channelId;
+  }
+  const response = await apiClient.get<AnalyticsOverviewReportResponse>('/youtube/analytics/overview', {
+    params,
+    signal,
+  });
+  return response.data;
+}
+
+/**
+ * Fetches traffic discovery vectors from YouTube Analytics API.
+ */
+export async function getTrafficSources(
+  channelId?: string,
+  days: number = 28,
+  signal?: AbortSignal
+): Promise<TrafficSourcesReportResponse> {
+  await ensureAuthenticatedSession();
+  const params: Record<string, string | number> = { days };
+  if (channelId) {
+    params.channel_id = channelId;
+  }
+  const response = await apiClient.get<TrafficSourcesReportResponse>('/youtube/analytics/traffic-sources', {
+    params,
+    signal,
+  });
+  return response.data;
+}
+
+/**
+ * Fetches country-level audience geography from YouTube Analytics API.
+ */
+export async function getAudienceGeography(
+  channelId?: string,
+  days: number = 28,
+  signal?: AbortSignal
+): Promise<GeographicAudienceReportResponse> {
+  await ensureAuthenticatedSession();
+  const params: Record<string, string | number> = { days };
+  if (channelId) {
+    params.channel_id = channelId;
+  }
+  const response = await apiClient.get<GeographicAudienceReportResponse>('/youtube/audience/geography', {
+    params,
+    signal,
+  });
+  return response.data;
+}
+
 export default {
   ensureAuthenticatedSession,
   getConnectionStatus,
@@ -147,4 +224,7 @@ export default {
   getChannelAudience,
   getChannelHistory,
   getChannelVideos,
+  getAnalyticsOverview,
+  getTrafficSources,
+  getAudienceGeography,
 };
