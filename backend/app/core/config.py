@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     WHISPER_COMPUTE_TYPE: str = "auto"
     WHISPER_CPU_THREADS: int = 4
     WHISPER_LANGUAGE: str = ""
+    WHISPER_INITIAL_PROMPT: str = (
+        "Yeh ek Hinglish video hai, jisme Hindi aur English dono mix hain. "
+        "Bhai, aaj hum ek important topic ke baare me baat karenge."
+    )
     TRANSCRIBE_MAX_SECONDS: int = 600
     WHISPER_MODEL_DIR: Path = BACKEND_DIR / "storage" / "models"
 
@@ -137,6 +141,20 @@ class Settings(BaseSettings):
         if v is None:
             return ""
         return str(v).strip()
+
+    @field_validator("WHISPER_INITIAL_PROMPT", mode="before")
+    @classmethod
+    def parse_whisper_initial_prompt(cls, v: Any) -> str:
+        default_prompt = (
+            "Yeh ek Hinglish video hai, jisme Hindi aur English dono mix hain. "
+            "Bhai, aaj hum ek important topic ke baare me baat karenge."
+        )
+        if v is None:
+            return default_prompt
+        v_str = str(v).strip()
+        if not v_str:
+            return default_prompt
+        return v_str
 
     @field_validator("TRANSCRIBE_MAX_SECONDS", mode="before")
     @classmethod

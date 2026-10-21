@@ -120,6 +120,32 @@ describe('TranscriptPanel Component Tests', () => {
     expect(screen.getByText(/device: CUDA/i)).toBeInTheDocument();
   });
 
+  it('renders "No speech detected in this video." when done with zero segments', async () => {
+    mockGetTranscript.mockResolvedValueOnce({
+      jobId,
+      state: 'done',
+      errorCode: null,
+      segments: [],
+      languageDetected: 'en',
+      durationCoveredSeconds: 15,
+      truncated: false,
+      modelSize: 'medium',
+      deviceUsed: 'cpu',
+    });
+
+    render(
+      <TranscriptPanel
+        jobId={jobId}
+        onSelectSegment={onSelectSegment}
+        onSeek={onSeek}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('No speech detected in this video.')).toBeInTheDocument();
+    });
+  });
+
   it('renders "failed" state with friendly message and retry button', async () => {
     mockGetTranscript.mockResolvedValueOnce({
       jobId,

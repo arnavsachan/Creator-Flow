@@ -1,11 +1,13 @@
 import io
 import json
+import logging
 from pathlib import Path
 import shutil
 import subprocess
 from unittest.mock import MagicMock, patch
 import uuid
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -67,6 +69,11 @@ def setup_test_db(tmp_path: Path):
         TRANSCRIBE_MAX_SECONDS=600,
         WHISPER_MODEL_SIZE="medium",
         WHISPER_DEVICE="auto",
+        WHISPER_LANGUAGE="",
+        WHISPER_INITIAL_PROMPT=(
+            "Yeh ek Hinglish video hai, jisme Hindi aur English dono mix hain. "
+            "Bhai, aaj hum ek important topic ke baare me baat karenge."
+        ),
     )
 
     app.dependency_overrides[get_db] = override_get_db
@@ -254,82 +261,236 @@ def test_interrupted_recovery(client: TestClient, video_with_audio_path: Path, s
     assert data["errorCode"] == "INTERRUPTED"
 
 
-def test_cuda_fallback_to_cpu(setup_test_db: Settings, tmp_path: Path):
-    audio_path = tmp_path / "test.wav"
-    audio_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+def test_transcribe_receives_numpy_ndarray(setup_test_db: Settings):
+    """
+    model.transcribe must receive a numpy ndarray, never a str or Path.
+    """
+    audio_array = np.zeros(16000, dtype=np.float32)
 
-    mock_whisper_cls = MagicMock()
+    received_audio = []
 
     class FakeSegment:
-        def __init__(self, start, end, text):
-            self.start = start
-            self.end = end
-            self.text = text
+        start = 0.0
+        end = 1.0
+        text = "Hello world"
+
+    class FakeInfo:
+        language = "en"
+
+    mock_model = MagicMock()
+
+    def fake_transcribe(audio, **kwargs):
+        received_audio.append(audio)
+        return ([FakeSegment()], FakeInfo())
+
+    mock_model.transcribe.side_effect = fake_transcribe
+
+    mock_whisper_cls = MagicMock(return_value=mock_model)
+    fake_module = MagicMock()
+    fake_module.WhisperModel = mock_whisper_cls
+
+    with patch.dict("sys.modules", {"faster_whisper": fake_module}):
+        transcription_module.transcribe_audio_file(
+            audio_array=audio_array,
+            settings=setup_test_db,
+        )
+
+    assert len(received_audio) == 1
+    assert isinstance(received_audio[0], np.ndarray)
+    assert not isinstance(received_audio[0], (str, Path))
+    assert received_audio[0].dtype == np.float32
+
+
+def test_cuda_error_during_transcribe_falls_back_to_cpu(setup_test_db: Settings):
+    """
+    A cuda error raised DURING transcribe/iteration (not at model load)
+    cleanly falls back to CPU, and device_used == 'cpu'.
+    """
+    audio_array = np.zeros(16000, dtype=np.float32)
+
+    class FakeSegment:
+        start = 0.0
+        end = 1.0
+        text = "cpu recovered text"
 
     class FakeInfo:
         language = "hi"
 
+    # Generator that raises during iteration on CUDA
+    def cuda_failing_generator():
+        raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        yield  # make it a generator
+
     def fake_init(model_size, device, compute_type, download_root, cpu_threads):
-        if device == "cuda":
-            raise RuntimeError("CUDA failed with error: no CUDA-capable device is detected")
         fake_model = MagicMock()
-        fake_model.transcribe.return_value = (
-            [FakeSegment(0.0, 1.2, "fallback text")],
-            FakeInfo(),
-        )
+        if device == "cuda":
+            fake_model.transcribe.return_value = (cuda_failing_generator(), FakeInfo())
+        else:
+            fake_model.transcribe.return_value = ([FakeSegment()], FakeInfo())
         return fake_model
 
-    mock_whisper_cls.side_effect = fake_init
-
+    mock_whisper_cls = MagicMock(side_effect=fake_init)
     fake_module = MagicMock()
     fake_module.WhisperModel = mock_whisper_cls
 
     with patch.dict("sys.modules", {"faster_whisper": fake_module}):
         segments, lang, model_size, device_used = transcription_module.transcribe_audio_file(
-            audio_path=audio_path,
+            audio_array=audio_array,
             settings=setup_test_db,
         )
 
     assert device_used == "cpu"
     assert lang == "hi"
     assert len(segments) == 1
-    assert segments[0]["text"] == "fallback text"
+    assert segments[0]["text"] == "cpu recovered text"
 
 
-def test_cuda_success_records_cuda(setup_test_db: Settings, tmp_path: Path):
-    audio_path = tmp_path / "test.wav"
-    audio_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+def test_empty_and_non_empty_language_and_initial_prompt(setup_test_db: Settings):
+    """
+    Empty language/prompt are NOT passed to transcribe; non-empty are;
+    WHISPER_INITIAL_PROMPT=off disables the prompt.
+    """
+    audio_array = np.zeros(16000, dtype=np.float32)
 
-    mock_whisper_cls = MagicMock()
+    passed_kwargs = []
 
     class FakeSegment:
-        def __init__(self, start, end, text):
-            self.start = start
-            self.end = end
-            self.text = text
+        start = 0.0
+        end = 1.0
+        text = "testing prompt"
 
     class FakeInfo:
-        language = "en"
+        language = "hi"
 
-    fake_model = MagicMock()
-    fake_model.transcribe.return_value = (
-        [FakeSegment(0.0, 1.0, "cuda transcribed")],
-        FakeInfo(),
-    )
-    mock_whisper_cls.return_value = fake_model
+    mock_model = MagicMock()
 
+    def fake_transcribe(audio, **kwargs):
+        passed_kwargs.append(kwargs)
+        return ([FakeSegment()], FakeInfo())
+
+    mock_model.transcribe.side_effect = fake_transcribe
+    mock_whisper_cls = MagicMock(return_value=mock_model)
     fake_module = MagicMock()
     fake_module.WhisperModel = mock_whisper_cls
 
     with patch.dict("sys.modules", {"faster_whisper": fake_module}):
-        segments, lang, model_size, device_used = transcription_module.transcribe_audio_file(
-            audio_path=audio_path,
+        # Case 1: Empty language, non-empty default prompt
+        setup_test_db.WHISPER_LANGUAGE = ""
+        transcription_module.transcribe_audio_file(audio_array, setup_test_db)
+        k1 = passed_kwargs[-1]
+        assert "language" not in k1
+        assert "initial_prompt" in k1
+        assert "vad_filter" in k1
+        assert k1["vad_filter"] is True
+
+        # Case 2: Specified language and initial_prompt='off'
+        setup_test_db.WHISPER_LANGUAGE = "hi"
+        setup_test_db.WHISPER_INITIAL_PROMPT = "off"
+        transcription_module.transcribe_audio_file(audio_array, setup_test_db)
+        k2 = passed_kwargs[-1]
+        assert k2.get("language") == "hi"
+        assert "initial_prompt" not in k2
+
+        # Case 3: Empty prompt
+        setup_test_db.WHISPER_INITIAL_PROMPT = ""
+        transcription_module.transcribe_audio_file(audio_array, setup_test_db)
+        k3 = passed_kwargs[-1]
+        assert "initial_prompt" not in k3
+
+
+def test_zero_segments_state_is_done(
+    client: TestClient,
+    video_with_audio_path: Path,
+    setup_test_db: Settings,
+):
+    """
+    Zero segments produces state 'done' with an empty list, not failed.
+    """
+    job = _upload_job(client, video_with_audio_path)
+    job_id = job["id"]
+
+    with patch("app.api.routes.shorts.is_faster_whisper_available", return_value=True), \
+         patch("app.services.transcription.transcribe_audio_file") as mock_transcribe:
+        mock_transcribe.return_value = ([], "en", "medium", "cpu")
+
+        resp = client.post(f"/api/v1/shorts/jobs/{job_id}/transcribe")
+        assert resp.status_code == 202
+
+    get_resp = client.get(f"/api/v1/shorts/jobs/{job_id}/transcript")
+    assert get_resp.status_code == 200
+    data = get_resp.json()["data"]
+    assert data["state"] == "done"
+    assert data["errorCode"] is None
+    assert data["segments"] == []
+
+
+def test_temp_wav_deleted_on_success_and_failure(
+    setup_test_db: Settings,
+    video_with_audio_path: Path,
+):
+    """
+    Temp wav is deleted on both success and failure.
+    """
+    storage_dir = setup_test_db.SHORTS_STORAGE_DIR
+    job_id = str(uuid.uuid4())
+    temp_wav = transcription_module.get_temp_audio_path(storage_dir, job_id)
+
+    # 1. On success
+    with patch("app.services.transcription.transcribe_audio_file", return_value=([], "hi", "medium", "cpu")):
+        transcription_module.process_transcription_background(
+            job_id=job_id,
+            stored_video_path_str=str(video_with_audio_path),
+            duration_seconds=2.0,
             settings=setup_test_db,
         )
+    assert not temp_wav.exists()
 
-    assert device_used == "cuda"
-    assert lang == "en"
-    assert segments[0]["text"] == "cuda transcribed"
+    # 2. On failure
+    job_id_fail = str(uuid.uuid4())
+    temp_wav_fail = transcription_module.get_temp_audio_path(storage_dir, job_id_fail)
+    with patch("app.services.transcription.transcribe_audio_file", side_effect=RuntimeError("transcribe crashed")):
+        transcription_module.process_transcription_background(
+            job_id=job_id_fail,
+            stored_video_path_str=str(video_with_audio_path),
+            duration_seconds=2.0,
+            settings=setup_test_db,
+        )
+    assert not temp_wav_fail.exists()
+
+
+def test_failure_logged_server_side_and_clean_api_response(
+    client: TestClient,
+    video_with_audio_path: Path,
+    setup_test_db: Settings,
+    caplog: pytest.LogCaptureFixture,
+):
+    """
+    Failure is logged server-side with traceback (logger.exception)
+    and the API error code is still PROCESSING_FAILED with no traceback in response.
+    """
+    job = _upload_job(client, video_with_audio_path)
+    job_id = job["id"]
+
+    with patch("app.api.routes.shorts.is_faster_whisper_available", return_value=True), \
+         patch("app.services.transcription.transcribe_audio_file") as mock_transcribe, \
+         caplog.at_level(logging.ERROR):
+        mock_transcribe.side_effect = RuntimeError("Fatal library internal crash: 0x80004005")
+
+        resp = client.post(f"/api/v1/shorts/jobs/{job_id}/transcribe")
+        assert resp.status_code == 202
+
+    # Check server-side logs have the exception
+    assert any("Fatal library internal crash" in record.message or (record.exc_info is not None) for record in caplog.records)
+
+    # Check client response has only clean code
+    get_resp = client.get(f"/api/v1/shorts/jobs/{job_id}/transcript")
+    assert get_resp.status_code == 200
+    data = get_resp.json()["data"]
+    assert data["state"] == "failed"
+    assert data["errorCode"] == "PROCESSING_FAILED"
+    # Ensure no library or traceback details in response
+    assert "0x80004005" not in json.dumps(data)
+    assert "Fatal" not in json.dumps(data)
 
 
 def test_delete_job_removes_sidecar_files(
@@ -384,7 +545,6 @@ def test_sidecar_filenames_never_contain_user_filenames(
     storage_dir = setup_test_db.SHORTS_STORAGE_DIR
     files_in_storage = [p.name for p in storage_dir.iterdir()]
 
-    # Verify that files generated for transcript match strictly the job id pattern
     expected_transcript = f"{job_id}.transcript.json"
     expected_state = f"{job_id}.transcript.state.json"
 
@@ -395,25 +555,3 @@ def test_sidecar_filenames_never_contain_user_filenames(
         assert "malicious" not in f_name
         assert "special" not in f_name
         assert "user" not in f_name
-
-
-def test_model_download_failed_handling(
-    client: TestClient,
-    video_with_audio_path: Path,
-    setup_test_db: Settings,
-):
-    job = _upload_job(client, video_with_audio_path)
-    job_id = job["id"]
-
-    with patch("app.api.routes.shorts.is_faster_whisper_available", return_value=True), \
-         patch("app.services.transcription.transcribe_audio_file") as mock_transcribe:
-        mock_transcribe.side_effect = MediaValidationError("MODEL_DOWNLOAD_FAILED")
-
-        resp = client.post(f"/api/v1/shorts/jobs/{job_id}/transcribe")
-        assert resp.status_code == 202
-
-    get_resp = client.get(f"/api/v1/shorts/jobs/{job_id}/transcript")
-    assert get_resp.status_code == 200
-    data = get_resp.json()["data"]
-    assert data["state"] == "failed"
-    assert data["errorCode"] == "MODEL_DOWNLOAD_FAILED"

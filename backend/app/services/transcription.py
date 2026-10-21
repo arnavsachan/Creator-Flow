@@ -5,7 +5,8 @@ import logging
 from pathlib import Path
 import subprocess
 import threading
-from typing import Optional
+from typing import Any, Optional
+import wave
 
 from app.core.config import Settings
 from app.schemas.shorts import TranscriptData, TranscriptSegment
@@ -25,10 +26,13 @@ _STATE_MUTEX = threading.Lock()
 
 def is_faster_whisper_available() -> bool:
     """
-    Checks lazily if faster_whisper is importable without importing heavy modules.
+    Checks lazily if faster_whisper and numpy are importable without importing heavy modules.
     """
     try:
-        return importlib.util.find_spec("faster_whisper") is not None
+        return (
+            importlib.util.find_spec("faster_whisper") is not None
+            and importlib.util.find_spec("numpy") is not None
+        )
     except Exception:
         return False
 
@@ -209,6 +213,28 @@ def extract_audio(
         raise MediaValidationError("PROCESSING_FAILED")
 
 
+def load_audio_wav_to_numpy(wav_path: Path) -> Any:
+    """
+    Reads a 16 kHz mono 16-bit PCM WAV file using Python's standard 'wave' module
+    and converts it to a 1D float32 numpy array normalized to [-1.0, 1.0].
+    Raises TRANSCRIPTION_UNAVAILABLE if numpy is missing.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise MediaValidationError("TRANSCRIPTION_UNAVAILABLE")
+
+    try:
+        with wave.open(str(wav_path.resolve()), "rb") as wf:
+            n_frames = wf.getnframes()
+            frames = wf.readframes(n_frames)
+        audio_int16 = np.frombuffer(frames, dtype=np.int16)
+        return audio_int16.astype(np.float32) / 32768.0
+    except Exception as exc:
+        logger.exception("Failed to read WAV audio file with wave library: %s", exc)
+        raise MediaValidationError("PROCESSING_FAILED")
+
+
 def _check_and_raise_download_error(exc: Exception) -> None:
     msg = str(exc).lower()
     name = type(exc).__name__.lower()
@@ -219,18 +245,28 @@ def _check_and_raise_download_error(exc: Exception) -> None:
 
 
 def transcribe_audio_file(
-    audio_path: Path,
+    audio_array: Any,
     settings: Settings,
 ) -> tuple[list[dict], str, str, str]:
     """
     Performs speech transcription using faster-whisper.
-    Lazy imports the library. Automatically falls back to CPU if CUDA fails.
+    Lazy imports the library. Passes audio_array (float32 numpy array) to model.transcribe.
+    Never passes a path or file object.
+    Automatically falls back to CPU if CUDA fails during model loading or during transcribe/iteration.
     Returns (segments, language_detected, model_size, device_used).
     """
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         raise MediaValidationError("TRANSCRIPTION_UNAVAILABLE")
+
+    try:
+        import numpy as np
+    except ImportError:
+        raise MediaValidationError("TRANSCRIPTION_UNAVAILABLE")
+
+    if not isinstance(audio_array, np.ndarray):
+        raise TypeError(f"audio_array must be a numpy ndarray, got {type(audio_array).__name__}")
 
     model_size = settings.WHISPER_MODEL_SIZE
     model_dir = settings.WHISPER_MODEL_DIR
@@ -240,8 +276,26 @@ def transcribe_audio_file(
     configured_device = settings.WHISPER_DEVICE
     configured_compute = settings.WHISPER_COMPUTE_TYPE
 
+    # Build kwargs for model.transcribe
+    transcribe_kwargs: dict[str, Any] = {
+        "beam_size": 5,
+        "vad_filter": True,
+    }
+
+    # Pass language only if non-empty
+    lang = settings.WHISPER_LANGUAGE.strip() if settings.WHISPER_LANGUAGE else ""
+    if lang:
+        transcribe_kwargs["language"] = lang
+
+    # Pass initial_prompt only when not empty and not "off"
+    prompt = settings.WHISPER_INITIAL_PROMPT.strip() if settings.WHISPER_INITIAL_PROMPT else ""
+    if prompt and prompt.lower() != "off":
+        transcribe_kwargs["initial_prompt"] = prompt
+
     model = None
     device_used = "cpu"
+    raw_segments: list[Any] = []
+    info = None
 
     if configured_device == "auto":
         # Step 1: Attempt CUDA
@@ -255,12 +309,20 @@ def transcribe_audio_file(
                 download_root=str(model_dir),
                 cpu_threads=threads,
             )
+            segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+            # Materialize the lazy generator INSIDE the CUDA try block to catch inference errors
+            raw_segments = list(segments_gen)
             device_used = "cuda"
-        except Exception as exc:
-            logger.warning("CUDA initialization failed (%s: %s). Falling back to CPU.", type(exc).__name__, exc)
+        except Exception as cuda_exc:
+            logger.warning(
+                "CUDA transcription failed (%s: %s). Falling back to CPU.",
+                type(cuda_exc).__name__,
+                cuda_exc,
+                exc_info=True,
+            )
             model = None
 
-        # Step 2: Fallback to CPU if CUDA failed
+        # Step 2: Fallback to CPU if CUDA failed during init, transcribe, or iteration
         if model is None:
             cpu_compute = "int8" if configured_compute == "auto" else configured_compute
             logger.info("Initializing Whisper model on CPU (model=%s, compute=%s)", model_size, cpu_compute)
@@ -272,10 +334,13 @@ def transcribe_audio_file(
                     download_root=str(model_dir),
                     cpu_threads=threads,
                 )
+                segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+                raw_segments = list(segments_gen)
                 device_used = "cpu"
-            except Exception as exc:
-                logger.error("Whisper CPU initialization failed: %s", type(exc).__name__)
-                _check_and_raise_download_error(exc)
+            except Exception as cpu_exc:
+                logger.exception("Whisper CPU transcription failed")
+                _check_and_raise_download_error(cpu_exc)
+
     elif configured_device == "cuda":
         cuda_compute = "float16" if configured_compute == "auto" else configured_compute
         try:
@@ -286,10 +351,13 @@ def transcribe_audio_file(
                 download_root=str(model_dir),
                 cpu_threads=threads,
             )
+            segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+            raw_segments = list(segments_gen)
             device_used = "cuda"
         except Exception as exc:
-            logger.error("Whisper CUDA initialization failed: %s", type(exc).__name__)
+            logger.exception("Whisper CUDA transcription failed")
             _check_and_raise_download_error(exc)
+
     else:
         cpu_compute = "int8" if configured_compute == "auto" else configured_compute
         try:
@@ -300,60 +368,24 @@ def transcribe_audio_file(
                 download_root=str(model_dir),
                 cpu_threads=threads,
             )
+            segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+            raw_segments = list(segments_gen)
             device_used = "cpu"
         except Exception as exc:
-            logger.error("Whisper CPU initialization failed: %s", type(exc).__name__)
+            logger.exception("Whisper CPU transcription failed")
             _check_and_raise_download_error(exc)
 
-    # Perform transcription
-    try:
-        segments_gen, info = model.transcribe(
-            str(audio_path.resolve()),
-            language=settings.WHISPER_LANGUAGE or None,
-            beam_size=5,
-        )
-        segments = []
-        for s in segments_gen:
-            segments.append({
-                "start": round(s.start, 2),
-                "end": round(s.end, 2),
-                "text": s.text.strip(),
-            })
-        lang = info.language if info and getattr(info, "language", None) else (settings.WHISPER_LANGUAGE or "unknown")
-        return segments, lang, model_size, device_used
-    except Exception as exc:
-        # If running on auto and CUDA crashed during transcription, retry on CPU
-        if configured_device == "auto" and device_used == "cuda":
-            logger.warning("CUDA execution error (%s: %s). Retrying transcription on CPU.", type(exc).__name__, exc)
-            cpu_compute = "int8" if configured_compute == "auto" else configured_compute
-            try:
-                cpu_model = WhisperModel(
-                    model_size,
-                    device="cpu",
-                    compute_type=cpu_compute,
-                    download_root=str(model_dir),
-                    cpu_threads=threads,
-                )
-                segments_gen, info = cpu_model.transcribe(
-                    str(audio_path.resolve()),
-                    language=settings.WHISPER_LANGUAGE or None,
-                    beam_size=5,
-                )
-                segments = []
-                for s in segments_gen:
-                    segments.append({
-                        "start": round(s.start, 2),
-                        "end": round(s.end, 2),
-                        "text": s.text.strip(),
-                    })
-                lang = info.language if info and getattr(info, "language", None) else (settings.WHISPER_LANGUAGE or "unknown")
-                return segments, lang, model_size, "cpu"
-            except Exception as cpu_exc:
-                logger.error("CPU fallback transcription failed: %s", type(cpu_exc).__name__)
-                _check_and_raise_download_error(cpu_exc)
+    segments = []
+    for s in raw_segments:
+        text = getattr(s, "text", "") or ""
+        segments.append({
+            "start": round(getattr(s, "start", 0.0), 2),
+            "end": round(getattr(s, "end", 0.0), 2),
+            "text": text.strip(),
+        })
 
-        logger.error("Transcription execution failed: %s", type(exc).__name__)
-        _check_and_raise_download_error(exc)
+    detected_lang = info.language if info and getattr(info, "language", None) else (lang or "unknown")
+    return segments, detected_lang, model_size, device_used
 
 
 def process_transcription_background(
@@ -381,8 +413,11 @@ def process_transcription_background(
                 ffprobe_bin=settings.FFPROBE_BIN,
             )
 
+            # Read 16 kHz mono WAV into float32 numpy array
+            audio_array = load_audio_wav_to_numpy(temp_wav)
+
             segments, lang, model_size, device_used = transcribe_audio_file(
-                audio_path=temp_wav,
+                audio_array=audio_array,
                 settings=settings,
             )
 
@@ -407,10 +442,10 @@ def process_transcription_background(
 
             write_transcript_state(storage_dir, job_id, "done")
     except MediaValidationError as err:
-        logger.error("Transcription failed with error code: %s", err.code)
+        logger.exception("Transcription failed with error code: %s", err.code)
         write_transcript_state(storage_dir, job_id, "failed", err.code)
     except Exception as exc:
-        logger.error("Transcription failed unexpectedly: %s", type(exc).__name__)
+        logger.exception("Transcription failed unexpectedly: %s", type(exc).__name__)
         write_transcript_state(storage_dir, job_id, "failed", "PROCESSING_FAILED")
     finally:
         temp_wav.unlink(missing_ok=True)
