@@ -60,11 +60,21 @@ def create_application() -> FastAPI:
         Catches unhandled exceptions inside route handlers to ensure CORS headers
         are always attached to 500 responses rather than causing browser Network Errors.
         """
+        origin = request.headers.get("origin")
+        response_headers: dict[str, str] = {}
+        if origin:
+            normalized_origin = origin.rstrip("/")
+            if normalized_origin in settings.CORS_ORIGINS:
+                response_headers["Access-Control-Allow-Origin"] = origin
+                response_headers["Vary"] = "Origin"
+
         if isinstance(exc, HTTPException):
+            if exc.headers:
+                response_headers.update(exc.headers)
             return JSONResponse(
                 status_code=exc.status_code,
                 content={"detail": exc.detail},
-                headers=exc.headers,
+                headers=response_headers,
             )
         logger.exception(
             "Unhandled server exception on %s %s: %s",
@@ -75,6 +85,7 @@ def create_application() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={"detail": "An internal server error occurred. Please try again later."},
+            headers=response_headers,
         )
 
     return app
