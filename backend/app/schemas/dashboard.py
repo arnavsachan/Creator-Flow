@@ -22,8 +22,8 @@ class KpiMetric(CamelModel):
     title: str
     value: float | int
     formatted_value: str
-    change: float | int
-    formatted_change: str
+    change: Optional[float | int] = None
+    formatted_change: Optional[str] = None
     trend: Literal["up", "down", "neutral"]
     change_period: str = "vs previous 28d"
     sparkline_points: list[float | int] = Field(default_factory=list)

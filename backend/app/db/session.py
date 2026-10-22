@@ -21,12 +21,19 @@ def get_engine() -> Engine:
     global _engine
     if _engine is None:
         settings = get_settings()
+        connect_args = {}
+        if "postgresql" in settings.DATABASE_URL:
+            connect_args = {"connect_timeout": 3}
+        elif "sqlite" in settings.DATABASE_URL:
+            connect_args = {"check_same_thread": False}
+
         _engine = create_engine(
             settings.DATABASE_URL,
             pool_pre_ping=True,
-            connect_args={"connect_timeout": 3},
+            connect_args=connect_args,
         )
     return _engine
+
 
 
 def get_session_factory() -> sessionmaker[Session]:
@@ -59,7 +66,7 @@ def check_database() -> bool:
     """
     Non-destructive check that runs SELECT 1.
     Returns True if reachable, False otherwise.
-    Never logs credentials or connection strings; logs only the exception class name.
+    Never logs credentials or connection strings; logs only a safe error category and exception class name.
     """
     try:
         engine = get_engine()
@@ -67,7 +74,18 @@ def check_database() -> bool:
             conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
-        logger.warning("Database connectivity check failed: %s", type(e).__name__)
+        err_msg = str(e).lower()
+        if "password authentication failed" in err_msg or "authentication failed" in err_msg:
+            category = "authentication_failed"
+        elif "connection refused" in err_msg:
+            category = "connection_refused"
+        elif "timeout" in err_msg or "timed out" in err_msg:
+            category = "connection_timeout"
+        elif "does not exist" in err_msg:
+            category = "database_not_found"
+        else:
+            category = "operational_error"
+        logger.warning("Database connectivity check failed: %s (%s)", type(e).__name__, category)
         return False
 
 

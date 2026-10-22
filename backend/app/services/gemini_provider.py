@@ -142,6 +142,7 @@ class GeminiProvider:
         self,
         api_key: Any = _DEFAULT_KEY,
         model: Optional[str] = None,
+        fallback_model: Optional[str] = None,
         timeout_seconds: Optional[float] = None,
         title_timeout_seconds: Optional[float] = None,
     ):
@@ -151,6 +152,8 @@ class GeminiProvider:
         else:
             self.api_key = api_key
         self.model: str = model or settings.GEMINI_MODEL or "gemini-3.8-flash"
+        self.fallback_model: Optional[str] = fallback_model or getattr(settings, "GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
+        self.effective_model: str = self.model
         self.timeout_seconds: float = timeout_seconds or getattr(settings, "GEMINI_TIMEOUT_SECONDS", 25.0)
         self.title_timeout_seconds: float = title_timeout_seconds or getattr(settings, "GEMINI_TITLE_TIMEOUT_SECONDS", 15.0)
 
@@ -182,6 +185,7 @@ class GeminiProvider:
         """
         Submits thumbnail image to Google Gemini multimodal vision model
         with structured JSON output matching GeminiThumbnailAnalysis.
+        Uses coordinated, bounded timeouts with fallback model support on 503/404.
         """
         client = self._get_client()
         from google.genai import types
@@ -205,29 +209,76 @@ class GeminiProvider:
         )
 
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=GeminiThumbnailAnalysis,
-            temperature=0.2,
-            http_options=types.HttpOptions(
-                timeout=int(self.timeout_seconds * 1000),
-                retry_options=types.HttpRetryOptions(attempts=2, initial_delay=1.0, http_status_codes=[503]),
-            ),
-        )
-
+        total_budget = self.timeout_seconds
         t0 = time.perf_counter()
-        try:
-            response = client.models.generate_content(
-                model=self.model,
-                contents=[prompt, image_part],
-                config=config,
-            )
-            return self._parse_thumbnail_response(response)
-        except GeminiError:
-            raise
-        except Exception as err:
+
+        models_to_try = [self.model]
+        if self.fallback_model and self.fallback_model != self.model:
+            models_to_try.append(self.fallback_model)
+
+        last_error: Optional[Exception] = None
+        for idx, model_name in enumerate(models_to_try):
             elapsed = time.perf_counter() - t0
-            self._handle_api_exception(err, elapsed_seconds=elapsed, timeout_budget=self.timeout_seconds)
+            remaining = total_budget - elapsed
+            if remaining <= 4.0:
+                break
+
+            # Use full remaining budget for attempt (bounded by total_budget, min 10.0s for Google API)
+            has_next = idx < len(models_to_try) - 1
+            attempt_timeout = max(10.0, remaining)
+
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiThumbnailAnalysis,
+                temperature=0.2,
+                http_options=types.HttpOptions(
+                    timeout=int(attempt_timeout * 1000),
+                ),
+            )
+
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[prompt, image_part],
+                    config=config,
+                )
+                self.effective_model = model_name
+                if model_name != self.model:
+                    logger.info("[GeminiProvider] Thumbnail scored using fallback model: %s", model_name)
+                return self._parse_thumbnail_response(response)
+            except GeminiError:
+                raise
+            except Exception as err:
+                last_error = err
+                elapsed_attempt = time.perf_counter() - t0
+                status_code = getattr(err, "code", None)
+                grpc_status = str(getattr(err, "status", "")).upper()
+                err_str = f"{status_code or ''} {grpc_status} {str(err)}".lower()
+                is_retryable_for_fallback = (
+                    status_code in (404, 429, 503, 504)
+                    or "unavailable" in err_str
+                    or "not_found" in err_str
+                    or "high demand" in err_str
+                    or "resource_exhausted" in err_str
+                    or "quota" in err_str
+                    or "deadline_exceeded" in err_str
+                    or "timed out" in err_str
+                )
+                if has_next and is_retryable_for_fallback:
+                    logger.warning(
+                        "[GeminiProvider] Model '%s' failed (%s); attempting fallback model '%s' within remaining budget (%.1fs remaining)",
+                        model_name,
+                        status_code or grpc_status or "error",
+                        models_to_try[idx + 1],
+                        total_budget - elapsed_attempt,
+                    )
+                    continue
+                break
+
+        elapsed_total = time.perf_counter() - t0
+        if last_error:
+            self._handle_api_exception(last_error, elapsed_seconds=elapsed_total, timeout_budget=total_budget)
+        raise GeminiTimeoutError(f"Thumbnail analysis timed out after {total_budget:.0f}s.")
 
     def analyze_title(
         self,
@@ -239,6 +290,7 @@ class GeminiProvider:
         """
         Submits proposed video title to Google Gemini model for
         curiosity, clarity, specificity, readability, and topic relevance analysis.
+        Uses coordinated, bounded timeouts with fallback model support on 503/404.
         """
         client = self._get_client()
         from google.genai import types
@@ -260,29 +312,75 @@ class GeminiProvider:
             "Provide 3 to 5 high-performing alternative headline formulas (Curiosity Hook, Numbered Listicle, How-To/Outcome, Contrarian Hook) tailored to this video concept."
         )
 
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=GeminiTitleAnalysis,
-            temperature=0.3,
-            http_options=types.HttpOptions(
-                timeout=int(self.title_timeout_seconds * 1000),
-                retry_options=types.HttpRetryOptions(attempts=2, initial_delay=1.0, http_status_codes=[503]),
-            ),
-        )
-
+        total_budget = self.title_timeout_seconds
         t0 = time.perf_counter()
-        try:
-            response = client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=config,
-            )
-            return self._parse_title_response(response)
-        except GeminiError:
-            raise
-        except Exception as err:
+
+        models_to_try = [self.model]
+        if self.fallback_model and self.fallback_model != self.model:
+            models_to_try.append(self.fallback_model)
+
+        last_error: Optional[Exception] = None
+        for idx, model_name in enumerate(models_to_try):
             elapsed = time.perf_counter() - t0
-            self._handle_api_exception(err, elapsed_seconds=elapsed, timeout_budget=self.title_timeout_seconds)
+            remaining = total_budget - elapsed
+            if remaining <= 3.0:
+                break
+
+            has_next = idx < len(models_to_try) - 1
+            attempt_timeout = max(10.0, remaining)
+
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiTitleAnalysis,
+                temperature=0.3,
+                http_options=types.HttpOptions(
+                    timeout=int(attempt_timeout * 1000),
+                ),
+            )
+
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config,
+                )
+                self.effective_model = model_name
+                if model_name != self.model:
+                    logger.info("[GeminiProvider] Title scored using fallback model: %s", model_name)
+                return self._parse_title_response(response)
+            except GeminiError:
+                raise
+            except Exception as err:
+                last_error = err
+                elapsed_attempt = time.perf_counter() - t0
+                status_code = getattr(err, "code", None)
+                grpc_status = str(getattr(err, "status", "")).upper()
+                err_str = f"{status_code or ''} {grpc_status} {str(err)}".lower()
+                is_retryable_for_fallback = (
+                    status_code in (404, 429, 503, 504)
+                    or "unavailable" in err_str
+                    or "not_found" in err_str
+                    or "high demand" in err_str
+                    or "resource_exhausted" in err_str
+                    or "quota" in err_str
+                    or "deadline_exceeded" in err_str
+                    or "timed out" in err_str
+                )
+                if has_next and is_retryable_for_fallback:
+                    logger.warning(
+                        "[GeminiProvider] Model '%s' failed (%s); attempting fallback model '%s' within remaining budget (%.1fs remaining)",
+                        model_name,
+                        status_code or grpc_status or "error",
+                        models_to_try[idx + 1],
+                        total_budget - elapsed_attempt,
+                    )
+                    continue
+                break
+
+        elapsed_total = time.perf_counter() - t0
+        if last_error:
+            self._handle_api_exception(last_error, elapsed_seconds=elapsed_total, timeout_budget=total_budget)
+        raise GeminiTimeoutError(f"Title analysis timed out after {total_budget:.0f}s.")
 
     def _parse_thumbnail_response(self, response: Any) -> GeminiThumbnailAnalysis:
         """Safely parses and validates Gemini thumbnail response."""

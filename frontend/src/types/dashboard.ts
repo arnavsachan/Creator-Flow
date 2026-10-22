@@ -4,8 +4,8 @@ export interface KpiMetric {
   title: string;
   value: number;
   formattedValue: string;
-  change: number;
-  formattedChange: string;
+  change?: number | null;
+  formattedChange?: string | null;
   trend: 'up' | 'down' | 'neutral';
   changePeriod: string;
   sparklinePoints: number[];

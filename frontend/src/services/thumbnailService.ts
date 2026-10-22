@@ -59,7 +59,7 @@ export function fileToBase64(file: File): Promise<string> {
 }
 
 export const THUMBNAIL_SCORING_TIMEOUT_MS = 30000; // 30s coordinated budget (25s Gemini SDK + 5s network/serialization buffer)
-export const TITLE_SCORING_TIMEOUT_MS = 20000; // 20s coordinated budget (15s Gemini SDK + 5s network/serialization buffer)
+export const TITLE_SCORING_TIMEOUT_MS = 25000; // 25s coordinated budget (20s Gemini SDK + 5s network/serialization buffer)
 
 /**
  * Submits an uploaded thumbnail to the backend scoring endpoint.
@@ -92,19 +92,27 @@ export async function scoreThumbnail(
     );
     return response.data;
   } catch (err: any) {
-    const backendDetail = err?.response?.data?.detail;
-    if (backendDetail && typeof backendDetail === 'string') {
+    const status: number | undefined = err?.status ?? err?.response?.status;
+    const backendDetail: string | undefined =
+      (typeof err?.data?.detail === 'string' && err.data.detail) ||
+      (typeof err?.response?.data?.detail === 'string' && err.response.data.detail) ||
+      (typeof err?.data?.message === 'string' && err.data.message) ||
+      (typeof err?.response?.data?.message === 'string' && err.response.data.message);
+
+    const isTimeout =
+      status === 504 ||
+      err?.code === 'ECONNABORTED' ||
+      err?.isTimeout === true ||
+      (typeof err?.message === 'string' && err.message.toLowerCase().includes('timeout'));
+
+    if (backendDetail) {
       const customErr = new Error(backendDetail);
-      if (err.response.status === 504) {
+      if (status === 504 || isTimeout) {
         (customErr as any).isTimeout = true;
+        (customErr as any).code = 'ECONNABORTED';
       }
       throw customErr;
     }
-
-    const isTimeout =
-      err?.code === 'ECONNABORTED' ||
-      err?.message?.toLowerCase().includes('timeout') ||
-      err?.response?.status === 504;
 
     if (isTimeout) {
       const timeoutError = new Error(
@@ -151,19 +159,27 @@ export async function scoreTitle(
     );
     return response.data;
   } catch (err: any) {
-    const backendDetail = err?.response?.data?.detail;
-    if (backendDetail && typeof backendDetail === 'string') {
+    const status: number | undefined = err?.status ?? err?.response?.status;
+    const backendDetail: string | undefined =
+      (typeof err?.data?.detail === 'string' && err.data.detail) ||
+      (typeof err?.response?.data?.detail === 'string' && err.response.data.detail) ||
+      (typeof err?.data?.message === 'string' && err.data.message) ||
+      (typeof err?.response?.data?.message === 'string' && err.response.data.message);
+
+    const isTimeout =
+      status === 504 ||
+      err?.code === 'ECONNABORTED' ||
+      err?.isTimeout === true ||
+      (typeof err?.message === 'string' && err.message.toLowerCase().includes('timeout'));
+
+    if (backendDetail) {
       const customErr = new Error(backendDetail);
-      if (err.response.status === 504) {
+      if (status === 504 || isTimeout) {
         (customErr as any).isTimeout = true;
+        (customErr as any).code = 'ECONNABORTED';
       }
       throw customErr;
     }
-
-    const isTimeout =
-      err?.code === 'ECONNABORTED' ||
-      err?.message?.toLowerCase().includes('timeout') ||
-      err?.response?.status === 504;
 
     if (isTimeout) {
       const timeoutError = new Error(

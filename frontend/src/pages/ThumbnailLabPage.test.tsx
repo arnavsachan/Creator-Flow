@@ -8,28 +8,30 @@ describe('ThumbnailLabPage', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders page title and all 3 navigation tabs', () => {
+  it('renders page title and both navigation tabs', () => {
     render(<ThumbnailLabPage />);
     expect(
       screen.getByText(/Thumbnail Lab & Title Scoring Engine/i)
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Thumbnail Audit/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Title Scorer/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Benchmarks/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Benchmarks/i })).not.toBeInTheDocument();
   });
 
-  it('switches to Benchmarks tab and displays preserved concepts', () => {
+  it('defaults to Thumbnail Audit tab and does not render Benchmarks content', () => {
     render(<ThumbnailLabPage />);
-    const benchmarksTab = screen.getByRole('button', { name: /Benchmarks/i });
-    fireEvent.click(benchmarksTab);
+    // Thumbnail Audit is active by default
+    expect(screen.getByText(/Upload Variant/i)).toBeInTheDocument();
+    expect(screen.getByText(/No Variant Analyzed Yet/i)).toBeInTheDocument();
 
+    // Benchmarks content must not be present
+    expect(screen.queryByRole('button', { name: /Benchmarks/i })).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Concept A: High Contrast Facial Focal Point/i)
-    ).toBeInTheDocument();
+      screen.queryByText(/Concept A: High Contrast Facial Focal Point/i)
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Concept B: Minimalist Code Architecture Diagram/i)
-    ).toBeInTheDocument();
-    expect(screen.getByText(/14.2:1 \(AAA\)/i)).toBeInTheDocument();
+      screen.queryByText(/Concept B: Minimalist Code Architecture Diagram/i)
+    ).not.toBeInTheDocument();
   });
 
   it('switches to Title Scorer tab and shows empty state', () => {

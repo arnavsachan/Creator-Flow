@@ -7,7 +7,7 @@ import { DataStateBanner } from '../states/DataStateBanner';
 import { dashboardSync } from '../../services/dashboardSync';
 
 export const AppLayout: React.FC = () => {
-  const { dataState } = useAppMode();
+  const { dataState, syncTelemetry, connectedChannel } = useAppMode();
   const [isSyncing, setIsSyncing] = useState<boolean>(dashboardSync.getIsSyncing());
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(dashboardSync.getLastSyncedAt());
 
@@ -20,8 +20,16 @@ export const AppLayout: React.FC = () => {
     };
   }, []);
 
-  const handleSync = () => {
-    dashboardSync.triggerSync();
+  const handleSync = async () => {
+    if (connectedChannel) {
+      try {
+        await syncTelemetry();
+      } catch (err) {
+        console.warn('[AppLayout] Global sync error:', err);
+      }
+    } else {
+      dashboardSync.triggerSync();
+    }
   };
 
   return (

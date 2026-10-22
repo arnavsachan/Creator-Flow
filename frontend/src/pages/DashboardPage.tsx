@@ -131,18 +131,20 @@ const DEFAULT_PIPELINE_ITEMS = [
 ];
 
 export const DashboardPage: React.FC = () => {
-  const { dataState, setDataState, selectedChannelId } = useAppMode();
+  const { dataState, setDataState, selectedChannelId, dateRange } = useAppMode();
   const navigate = useNavigate();
   const [metricTab, setMetricTab] = useState<'views' | 'watchTime' | 'subscribers'>('views');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   const [overviewData, setOverviewData] = useState<DashboardOverviewData | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [apiError, setApiError] = useState<NormalizedApiError | null>(null);
 
   const isDemo = isDemoChannel(selectedChannelId);
   const activeChannelIdRef = useRef<string>(selectedChannelId);
   const retryControllerRef = useRef<AbortController | null>(null);
+  const days = parseInt(dateRange, 10) || 28;
 
   useEffect(() => {
     activeChannelIdRef.current = selectedChannelId;
@@ -166,9 +168,10 @@ export const DashboardPage: React.FC = () => {
       setApiError(null);
       dashboardSync.setIsSyncing(true);
       try {
-        const response = await getDashboardOverview(selectedChannelId, controller.signal);
+        const response = await getDashboardOverview(selectedChannelId, days, controller.signal);
         if (isMounted && activeChannelIdRef.current === selectedChannelId) {
           setOverviewData(response.data);
+          setLastSyncedAt(response.last_synced_at ?? null);
           dashboardSync.setLastSyncedAt(response.last_synced_at ?? null);
           if (response.data_state) {
             setDataState(response.data_state);
@@ -202,7 +205,7 @@ export const DashboardPage: React.FC = () => {
       isMounted = false;
       controller.abort();
     };
-  }, [selectedChannelId, setDataState]);
+  }, [selectedChannelId, days, setDataState]);
 
   const handleManualRetry = useCallback(() => {
     if (loading) return;
@@ -218,12 +221,13 @@ export const DashboardPage: React.FC = () => {
     setApiError(null);
     dashboardSync.setIsSyncing(true);
 
-    getDashboardOverview(targetChannel, controller.signal)
+    getDashboardOverview(targetChannel, days, controller.signal)
       .then((res) => {
         if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
           return;
         }
         setOverviewData(res.data);
+        setLastSyncedAt(res.last_synced_at ?? null);
         dashboardSync.setLastSyncedAt(res.last_synced_at ?? null);
         if (res.data_state) {
           setDataState(res.data_state);
@@ -244,7 +248,7 @@ export const DashboardPage: React.FC = () => {
         setLoading(false);
         dashboardSync.setIsSyncing(false);
       });
-  }, [loading, setDataState]);
+  }, [loading, days, setDataState]);
 
   // Listen to manual sync triggers from Topbar/DataStateBanner
   useEffect(() => {
@@ -610,7 +614,11 @@ export const DashboardPage: React.FC = () => {
                 Channel Growth Velocity
               </div>
               <div className="text-sm text-zinc-300 font-medium mt-0.5">
-                Aggregate 28-day performance trajectory
+                {isDemo
+                  ? 'Aggregate 28-day performance trajectory'
+                  : chartData.length === 1
+                  ? '1 baseline telemetry snapshot recorded • Multi-day trend expands with subsequent daily syncs'
+                  : `Aggregate ${dateRange} performance trajectory`}
               </div>
             </div>
 
@@ -634,15 +642,61 @@ export const DashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Interactive Recharts Canvas / Empty State */}
+          {/* Interactive Recharts Canvas / Empty State / Insufficient History State */}
           <div className="h-72 w-full">
             {chartData.length === 0 ? (
               <div className="h-full w-full flex flex-col items-center justify-center text-zinc-500 font-mono text-xs border border-dashed border-zinc-800 rounded-md">
                 No velocity chart telemetry recorded for this channel.
               </div>
+            ) : chartData.length === 1 && !isDemo ? (
+              <div
+                className="h-full w-full flex flex-col items-center justify-center p-6 bg-zinc-900/30 border border-zinc-800/80 rounded-md text-center space-y-3"
+                data-testid="insufficient-history-state"
+              >
+                <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700/60 flex items-center justify-center mx-auto text-zinc-400">
+                  <Clock className="w-5 h-5 text-indigo-400" />
+                </div>
+                <div className="space-y-1.5 max-w-md">
+                  <div className="text-xs font-semibold text-zinc-200">
+                    Insufficient History for Growth Trajectory
+                  </div>
+                  <p className="text-[11px] text-zinc-300 leading-relaxed font-sans">
+                    Current baseline recorded:{' '}
+                    <strong className="text-zinc-100 font-mono">
+                      {overviewData?.kpis.totalViews.formattedValue ?? chartData[0].views.toLocaleString()} views
+                    </strong>
+                    {chartData[0].date ? ` (${chartData[0].date})` : ''}
+                    {lastSyncedAt ? (
+                      <span className="text-zinc-400 block text-[10px] font-mono mt-0.5">
+                        Recorded:{' '}
+                        {new Date(lastSyncedAt).toLocaleString(undefined, {
+                          dateStyle: 'short',
+                          timeStyle: 'short',
+                        })}
+                      </span>
+                    ) : null}
+                  </p>
+                  <p className="text-[11px] text-zinc-500 leading-relaxed font-sans">
+                    Multi-day growth trajectories and velocity curves expand automatically after subsequent daily sync snapshots are recorded.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleManualRetry}
+                  disabled={loading}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700/80 transition-colors cursor-pointer disabled:opacity-50"
+                  data-testid="sync-now-insufficient-history"
+                >
+                  <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+                  <span>{loading ? 'Syncing...' : 'Sync Now'}</span>
+                </button>
+              </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <AreaChart
+                  data={chartData}
+                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                >
                   <defs>
                     <linearGradient id="metricGradient" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={currentMetric.stroke} stopOpacity={0.12} />
@@ -687,6 +741,8 @@ export const DashboardPage: React.FC = () => {
                     strokeWidth={1.5}
                     fillOpacity={1}
                     fill="url(#metricGradient)"
+                    dot={{ r: 4, fill: currentMetric.stroke }}
+                    activeDot={{ r: 6 }}
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -852,14 +908,25 @@ export const DashboardPage: React.FC = () => {
                 ) : (
                   recentVideos.map((vid) => (
                     <tr key={vid.id} className="hover:bg-zinc-900/40 transition-colors group">
-                      {/* Video with 16:9 placeholder thumbnail */}
+                      {/* Video with thumbnail */}
                       <td className="py-3 pr-3">
                         <div className="flex items-center gap-3">
-                          <div className="w-14 h-8 shrink-0 rounded bg-zinc-800 border border-zinc-700/50 flex items-center justify-center text-[9px] font-mono text-zinc-500">
-                            16:9
-                          </div>
+                          {vid.thumbnailUrl ? (
+                            <img
+                              src={vid.thumbnailUrl}
+                              alt={vid.title}
+                              className="w-14 h-8 shrink-0 rounded object-cover border border-zinc-700/50"
+                            />
+                          ) : (
+                            <div className="w-14 h-8 shrink-0 rounded bg-zinc-800 border border-zinc-700/50 flex items-center justify-center text-[9px] font-mono text-zinc-500">
+                              16:9
+                            </div>
+                          )}
                           <div className="min-w-0 max-w-[240px]">
-                            <div className="text-zinc-200 font-medium truncate group-hover:text-white transition-colors">
+                            <div
+                              className="text-zinc-200 font-medium truncate group-hover:text-white transition-colors"
+                              title={vid.title}
+                            >
                               {vid.title}
                             </div>
                             <div className="text-[11px] text-zinc-500">{vid.published}</div>
@@ -869,7 +936,7 @@ export const DashboardPage: React.FC = () => {
 
                       {/* Views */}
                       <td className="py-3 text-right font-mono text-zinc-200 tabular-nums">
-                        {vid.formattedViews ?? vid.views.toLocaleString()}
+                        {vid.formattedViews ?? vid.views.toLocaleString('en-US')}
                       </td>
 
                       {/* AVD */}

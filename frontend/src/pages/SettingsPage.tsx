@@ -103,8 +103,8 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           <div className="p-3 rounded-md bg-[#09090B] border border-zinc-800 text-xs text-zinc-400 font-mono flex items-center justify-between">
-            <span>Client ID: 8192039120-innotech.apps.googleusercontent.com</span>
-            <span className="text-[10px] text-emerald-400">Configured in Phase 2</span>
+            <span>OAuth 2.0 Web Application Client</span>
+            <span className="text-[10px] text-emerald-400">Configured in backend/.env</span>
           </div>
         </div>
       </div>

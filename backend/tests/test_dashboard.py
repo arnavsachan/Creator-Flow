@@ -202,3 +202,132 @@ def test_dashboard_overview_cors_preflight(client: TestClient):
     )
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_dashboard_overview_live_connected_channel(client: TestClient, db_session):
+    """
+    GET /api/v1/dashboard/overview?channel_id=<live_channel> returns 200 LIVE data
+    with exact persisted database metrics for the connected channel.
+    """
+    from app.models.channel import ConnectedChannel
+    from app.models.user import User
+
+    # Create user and live channel in database
+    user = User(id="user_live_test", email="live@example.com", is_active=True)
+    db_session.add(user)
+    db_session.commit()
+
+    live_ch = ConnectedChannel(
+        id="chan_live_123",
+        user_id="user_live_test",
+        platform="youtube",
+        channel_id="UC_LIVE_TEST_CH",
+        title="Live Tech Lab",
+        subscriber_count=43,
+        video_count=13,
+        view_count=11704,
+        status="connected",
+    )
+    db_session.add(live_ch)
+    db_session.commit()
+
+    response = client.get("/api/v1/dashboard/overview?channel_id=UC_LIVE_TEST_CH")
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["data_state"] == "LIVE"
+    assert "Live Tech Lab" in body["message"]
+    data = body["data"]
+    assert data["channelId"] == "UC_LIVE_TEST_CH"
+    assert data["kpis"]["totalViews"]["value"] == 11704
+    assert data["kpis"]["totalViews"]["formattedValue"] == "11,704"
+    assert data["kpis"]["totalViews"]["change"] is None
+    assert data["kpis"]["totalViews"]["formattedChange"] is None
+    assert data["kpis"]["totalViews"]["changePeriod"] == "Initial baseline snapshot"
+    assert data["kpis"]["netSubscribers"]["value"] == 43
+    assert data["kpis"]["netSubscribers"]["formattedValue"] == "43"
+    assert data["kpis"]["netSubscribers"]["change"] is None
+    assert data["kpis"]["netSubscribers"]["changePeriod"] == "Initial baseline snapshot"
+    assert data["kpis"]["watchTimeHours"]["value"] == 13
+    assert data["kpis"]["estimatedPartnerRevenue"] is None
+    assert len(data["velocityChart"]) == 1
+    assert data["velocityChart"][0]["views"] == 11704
+
+
+def test_dashboard_overview_live_channel_with_snapshots_and_videos(client: TestClient, db_session):
+    """
+    GET /api/v1/dashboard/overview?channel_id=<live_channel>&days=28 returns
+    populated velocity chart points and recent video uploads.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.models.channel import ConnectedChannel
+    from app.models.snapshot import ChannelSnapshot
+    from app.models.video import ChannelVideo
+    from app.models.user import User
+
+    user = User(id="user_overview_sv", email="sv@example.com", is_active=True)
+    db_session.add(user)
+    db_session.commit()
+
+    live_ch = ConnectedChannel(
+        id="chan_overview_sv",
+        user_id="user_overview_sv",
+        platform="youtube",
+        channel_id="UC_OVERVIEW_SV",
+        title="SV Studio",
+        subscriber_count=50,
+        video_count=3,
+        view_count=12000,
+        status="connected",
+    )
+    db_session.add(live_ch)
+
+    now = datetime.now(timezone.utc)
+    s1 = ChannelSnapshot(
+        channel_id="UC_OVERVIEW_SV",
+        snapshot_at=now - timedelta(days=10),
+        subscriber_count=40,
+        video_count=2,
+        view_count=10000,
+        sync_status="success",
+    )
+    s2 = ChannelSnapshot(
+        channel_id="UC_OVERVIEW_SV",
+        snapshot_at=now,
+        subscriber_count=50,
+        video_count=3,
+        view_count=12000,
+        sync_status="success",
+    )
+    v1 = ChannelVideo(
+        channel_id="UC_OVERVIEW_SV",
+        video_id="vid_sv_1",
+        title="Autonomous AI Studio",
+        published_at=now - timedelta(days=2),
+        thumbnail_url="https://example.com/thumb1.jpg",
+        view_count=6000,
+        like_count=300,
+        comment_count=40,
+        last_synced_at=now,
+    )
+    db_session.add_all([s1, s2, v1])
+    db_session.commit()
+
+    response = client.get("/api/v1/dashboard/overview?channel_id=UC_OVERVIEW_SV&days=28")
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    # Velocity chart has both snapshots
+    assert len(data["velocityChart"]) == 2
+    assert data["velocityChart"][0]["views"] == 10000
+    assert data["velocityChart"][1]["views"] == 12000
+    assert data["velocityChart"][1]["subscribers"] == 50
+
+    # Recent videos has v1
+    assert len(data["recentVideos"]) == 1
+    assert data["recentVideos"][0]["id"] == "vid_sv_1"
+    assert data["recentVideos"][0]["title"] == "Autonomous AI Studio"
+    assert data["recentVideos"][0]["views"] == 6000
+    assert data["recentVideos"][0]["formattedViews"] == "6,000"
+    assert data["recentVideos"][0]["avd"] == "—"
+    assert data["recentVideos"][0]["ctr"] == "—"

@@ -8,3 +8,6 @@ alembic==1.20.0
 httpx==0.28.1
 pytest==9.1.1
 google-genai>=0.1.0
+cryptography==50.0.2
+pyjwt==2.15.1
+bcrypt==5.0.0

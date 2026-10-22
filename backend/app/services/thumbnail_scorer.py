@@ -276,10 +276,12 @@ def score_thumbnail(
             if "16:9" not in metadata.aspect_ratio and "9:16" not in metadata.aspect_ratio:
                 warnings.append(f"Aspect ratio is {metadata.aspect_ratio}; YouTube standard video grid requires 16:9.")
 
+            eff = getattr(provider, "effective_model", None)
+            effective_model = eff if isinstance(eff, str) else getattr(provider, "model", "gemini-3.8-flash")
             logger.info(
                 "[ThumbnailScorer] Gemini evaluation successful: sha256=%s model=%s score=%d grade=%s",
                 metadata.sha256_hash,
-                provider.model,
+                effective_model,
                 overall_score,
                 grade,
             )
@@ -293,8 +295,8 @@ def score_thumbnail(
                 suggestions=analysis.suggestions[:5],
                 warnings=warnings,
                 metadata=metadata,
-                provider=f"google-gemini/{provider.model}",
-                provider_note=f"Multimodal AI visual audit performed by Google Gemini ({provider.model}). Canvas dimensions and file format verified by server diagnostics.",
+                provider=f"google-gemini/{effective_model}",
+                provider_note=f"Multimodal AI visual audit performed by Google Gemini ({effective_model}). Canvas dimensions and file format verified by server diagnostics.",
                 evaluated_at=datetime.now(timezone.utc).isoformat(),
             )
 
@@ -673,8 +675,8 @@ def score_title(
                 alternative_titles=analysis.alternative_titles[:5],
                 character_count=len(title),
                 word_count=len(words),
-                provider=f"google-gemini/{provider.model}",
-                provider_note=f"AI title optimization and hook analysis performed by Google Gemini ({provider.model}). Scores calculated deterministically.",
+                provider=f"google-gemini/{eff_title if isinstance((eff_title := getattr(provider, 'effective_model', None)), str) else getattr(provider, 'model', 'gemini-3.8-flash')}",
+                provider_note=f"AI title optimization and hook analysis performed by Google Gemini ({eff_title if isinstance(eff_title, str) else getattr(provider, 'model', 'gemini-3.8-flash')}). Scores calculated deterministically.",
                 evaluated_at=datetime.now(timezone.utc).isoformat(),
             )
 
