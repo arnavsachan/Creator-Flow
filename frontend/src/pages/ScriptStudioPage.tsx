@@ -45,7 +45,18 @@ const DEFAULT_SCRIPT = `[0:00 - 0:05] HOOK:
 [3:00 - 3:30] CALL TO ACTION & RETENTION BRIDGE:
 "If you want the complete interactive system design checklist with 15 real interview transcripts, check the pinned resource in the description below."`;
 
-export const ScriptStudioPage: React.FC = () => {
+export interface ScriptStudioPageProps {
+  initialIdea?: {
+    topic?: string;
+    title?: string;
+    hook?: string;
+    format?: string;
+    tone?: string;
+    audiencePersona?: string;
+  };
+}
+
+export const ScriptStudioPage: React.FC<ScriptStudioPageProps> = ({ initialIdea }) => {
   const topicInputId = useId();
   const titleInputId = useId();
   const durationSelectId = useId();
@@ -53,18 +64,56 @@ export const ScriptStudioPage: React.FC = () => {
   const personaInputId = useId();
   const { selectedChannelId } = useAppMode();
 
+  // Safely resolve incoming idea from props, React Router history state, or URL search params
+  const incoming = (() => {
+    if (initialIdea) return initialIdea;
+    try {
+      if (typeof window !== 'undefined') {
+        const histState = window.history?.state;
+        if (histState?.usr) return histState.usr;
+        const params = new URLSearchParams(window.location.search);
+        if (params.has('topic') || params.has('title')) {
+          return {
+            topic: params.get('topic') || undefined,
+            title: params.get('title') || undefined,
+            hook: params.get('hook') || undefined,
+            format: params.get('format') || undefined,
+            tone: params.get('tone') || undefined,
+            audiencePersona: params.get('audiencePersona') || undefined,
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  })();
+
   // Generation Controls State
-  const [topic, setTopic] = useState('System Design Interview Blueprint');
-  const [targetDuration, setTargetDuration] = useState('8m 00s');
-  const [tone, setTone] = useState('Authoritative');
-  const [audiencePersona, setAudiencePersona] = useState('Software Engineers & Tech Leads');
+  const [topic, setTopic] = useState(
+    incoming?.topic || incoming?.title || 'System Design Interview Blueprint'
+  );
+  const [targetDuration, setTargetDuration] = useState(
+    incoming?.format === 'shorts' ? '0m 45s' : '8m 00s'
+  );
+  const [tone, setTone] = useState(incoming?.tone || 'Authoritative');
+  const [audiencePersona, setAudiencePersona] = useState(
+    incoming?.audiencePersona || 'Software Engineers & Tech Leads'
+  );
   const [hookType, setHookType] = useState<HookArchetype>('negative');
-  const [scriptTitle, setScriptTitle] = useState('System Design Interview Blueprint');
+  const [scriptTitle, setScriptTitle] = useState(
+    incoming?.title || 'System Design Interview Blueprint'
+  );
 
   // Editor and Content State
-  const [scriptText, setScriptText] = useState(DEFAULT_SCRIPT);
+  const [scriptText, setScriptText] = useState(() => {
+    if (incoming?.hook) {
+      return `[0:00 - 0:05] HOOK:\n"${incoming.hook}"\n\n[0:05 - 0:25] RETENTION LOCK:\n"In this video, I'm breaking down the actual strategies for ${incoming.topic || incoming.title || 'this topic'}."\n\n[0:25 - 1:45] CORE POINT 1:\n"..."\n\n[1:45 - 2:30] CALL TO ACTION:\n"Check out the resources in the description below."`;
+    }
+    return DEFAULT_SCRIPT;
+  });
   const [generatedHooks, setGeneratedHooks] = useState<HookVariation[]>([]);
-  const [selectedHookText, setSelectedHookText] = useState<string>('');
+  const [selectedHookText, setSelectedHookText] = useState<string>(incoming?.hook || '');
   const [auditData, setAuditData] = useState<RetentionAuditResponse | null>(null);
 
   // Saved Scripts State
