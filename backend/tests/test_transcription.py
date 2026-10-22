@@ -595,7 +595,10 @@ def test_transcribe_speech_whisper_cuda_fallback(monkeypatch, setup_test_db):
             info.language = "en"
             return ([MockSegment(0.0, 1.0, "Fallback hello")], info)
 
-    with patch("faster_whisper.WhisperModel", MockWhisperModel):
+    import sys
+    mock_fw = MagicMock()
+    mock_fw.WhisperModel = MockWhisperModel
+    with patch.dict(sys.modules, {"faster_whisper": mock_fw}):
         segments, lang, model_sz, dev_used = transcription_module.transcribe_audio_file(
             audio_array=dummy_audio,
             settings=settings,
