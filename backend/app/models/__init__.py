@@ -6,5 +6,16 @@ from app.models.script import Script
 from app.models.snapshot import ChannelSnapshot
 from app.models.user import User
 from app.models.video import ChannelVideo
+from app.models.video_idea import VideoIdea
 
-__all__ = ["User", "ConnectedChannel", "OAuthState", "ChannelSnapshot", "ChannelVideo", "ContentPlan", "Competitor", "Script"]
+__all__ = [
+    "User",
+    "ConnectedChannel",
+    "OAuthState",
+    "ChannelSnapshot",
+    "ChannelVideo",
+    "ContentPlan",
+    "Competitor",
+    "Script",
+    "VideoIdea",
+]

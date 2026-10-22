@@ -8,6 +8,7 @@ from app.api.routes.competitors import router as competitors_router
 from app.api.routes.content_plan import router as content_plan_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.health import router as health_router
+from app.api.routes.ideas import router as ideas_router
 from app.api.routes.scripts import router as scripts_router
 from app.api.routes.thumbnails import router as thumbnails_router
 from app.api.routes.youtube import router as youtube_router
@@ -46,6 +47,7 @@ def create_application() -> FastAPI:
     app.include_router(competitors_router, prefix=settings.API_V1_PREFIX)
     app.include_router(content_plan_router, prefix=settings.API_V1_PREFIX)
     app.include_router(dashboard_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(ideas_router, prefix=settings.API_V1_PREFIX)
     app.include_router(scripts_router, prefix=settings.API_V1_PREFIX)
     app.include_router(youtube_router, prefix=settings.API_V1_PREFIX)
 
