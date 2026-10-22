@@ -38,6 +38,17 @@ def create_application() -> FastAPI:
     # Mount shorts router under /api/v1 (router has prefix="/shorts")
     app.include_router(shorts_router, prefix=settings.API_V1_PREFIX)
 
+    # Ensure unhandled exceptions return JSON with CORS headers preserved
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request, exc):
+        import logging
+        from fastapi.responses import JSONResponse
+        logging.getLogger(__name__).exception("Unhandled exception processing request: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "INTERNAL_SERVER_ERROR", "message": str(exc)},
+        )
+
     return app
 
 

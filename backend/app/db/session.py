@@ -17,15 +17,39 @@ def get_engine() -> Engine:
     """
     Lazily creates and returns the SQLAlchemy Engine.
     Ensures that importing the app never fails or blocks when PostgreSQL is down.
+    Automatically supports SQLite and dev SQLite when placeholder credentials are used.
     """
     global _engine
     if _engine is None:
         settings = get_settings()
-        _engine = create_engine(
-            settings.DATABASE_URL,
-            pool_pre_ping=True,
-            connect_args={"connect_timeout": 3},
-        )
+        db_url = settings.DATABASE_URL
+
+        # If in development and DATABASE_URL is unset or contains unconfigured placeholder, fallback to dev SQLite
+        if settings.ENVIRONMENT == "development" and ("<DB_USER>" in db_url or "<DB_PASSWORD>" in db_url):
+            from pathlib import Path
+            dev_db = Path(__file__).resolve().parent.parent.parent / "dev_local" / "shorts_dev.sqlite3"
+            dev_db.parent.mkdir(parents=True, exist_ok=True)
+            db_url = f"sqlite:///{dev_db.as_posix()}"
+            logger.warning(
+                "DATABASE_URL contains placeholder credentials in development mode. "
+                "Falling back to local SQLite at %s",
+                dev_db,
+            )
+
+        if db_url.startswith("sqlite"):
+            _engine = create_engine(
+                db_url,
+                connect_args={"check_same_thread": False},
+            )
+            from app.db.base import Base
+            from app.models.shorts import ShortsClip, ShortsJob
+            Base.metadata.create_all(bind=_engine, tables=[ShortsJob.__table__, ShortsClip.__table__])
+        else:
+            _engine = create_engine(
+                db_url,
+                pool_pre_ping=True,
+                connect_args={"connect_timeout": 3},
+            )
     return _engine
 
 

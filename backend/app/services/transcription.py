@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -17,6 +18,54 @@ from app.services.media import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def setup_windows_cuda_dlls() -> None:
+    """
+    On Windows (os.name == 'nt'), locates site-packages/nvidia/*/bin directories
+    and registers them via os.add_dll_directory(...) and prepends them to os.environ["PATH"]
+    so that CTranslate2 and faster-whisper can find CUDA, cuBLAS, and cuDNN DLLs.
+    Guarded so it never crashes if directories do not exist.
+    """
+    if os.name != "nt":
+        return
+
+    try:
+        import sys
+
+        candidate_roots: list[Path] = []
+        for p in sys.path:
+            if "site-packages" in p:
+                candidate_roots.append(Path(p))
+        if sys.prefix:
+            candidate_roots.append(Path(sys.prefix) / "Lib" / "site-packages")
+
+        added_paths: set[str] = set()
+        for root in candidate_roots:
+            nvidia_dir = root / "nvidia"
+            if not nvidia_dir.is_dir():
+                continue
+            for bin_dir in nvidia_dir.glob("*/bin"):
+                if bin_dir.is_dir():
+                    bin_dir_str = str(bin_dir.resolve())
+                    if bin_dir_str not in added_paths:
+                        added_paths.add(bin_dir_str)
+                        if hasattr(os, "add_dll_directory"):
+                            try:
+                                os.add_dll_directory(bin_dir_str)
+                            except Exception:
+                                pass
+                        cur_path = os.environ.get("PATH", "")
+                        if bin_dir_str not in cur_path:
+                            os.environ["PATH"] = bin_dir_str + os.pathsep + cur_path
+        if added_paths:
+            logger.info("Registered Windows CUDA DLL directories: %s", list(added_paths))
+    except Exception as exc:
+        logger.warning("Failed to register Windows CUDA DLL directories: %s", exc)
+
+
+# Initialize Windows CUDA DLL search paths at module load
+setup_windows_cuda_dlls()
 
 # Process-wide locks and state
 _TRANSCRIPTION_LOCK = threading.Lock()
@@ -255,6 +304,7 @@ def transcribe_audio_file(
     Automatically falls back to CPU if CUDA fails during model loading or during transcribe/iteration.
     Returns (segments, language_detected, model_size, device_used).
     """
+    setup_windows_cuda_dlls()
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -279,18 +329,7 @@ def transcribe_audio_file(
     # Build kwargs for model.transcribe
     transcribe_kwargs: dict[str, Any] = {
         "beam_size": 5,
-        "vad_filter": True,
     }
-
-    # Pass language only if non-empty
-    lang = settings.WHISPER_LANGUAGE.strip() if settings.WHISPER_LANGUAGE else ""
-    if lang:
-        transcribe_kwargs["language"] = lang
-
-    # Pass initial_prompt only when not empty and not "off"
-    prompt = settings.WHISPER_INITIAL_PROMPT.strip() if settings.WHISPER_INITIAL_PROMPT else ""
-    if prompt and prompt.lower() != "off":
-        transcribe_kwargs["initial_prompt"] = prompt
 
     model = None
     device_used = "cpu"
@@ -309,7 +348,14 @@ def transcribe_audio_file(
                 download_root=str(model_dir),
                 cpu_threads=threads,
             )
-            segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+            segments_gen, info = model.transcribe(
+                audio_array,
+                task="translate",
+                language="hi",
+                condition_on_previous_text=False,
+                vad_filter=True,
+                **transcribe_kwargs
+            )
             # Materialize the lazy generator INSIDE the CUDA try block to catch inference errors
             raw_segments = list(segments_gen)
             device_used = "cuda"
@@ -334,7 +380,14 @@ def transcribe_audio_file(
                     download_root=str(model_dir),
                     cpu_threads=threads,
                 )
-                segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+                segments_gen, info = model.transcribe(
+                    audio_array,
+                    task="translate",
+                    language="hi",
+                    condition_on_previous_text=False,
+                    vad_filter=True,
+                    **transcribe_kwargs
+                )
                 raw_segments = list(segments_gen)
                 device_used = "cpu"
             except Exception as cpu_exc:
@@ -351,12 +404,45 @@ def transcribe_audio_file(
                 download_root=str(model_dir),
                 cpu_threads=threads,
             )
-            segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+            segments_gen, info = model.transcribe(
+                audio_array,
+                task="translate",
+                language="hi",
+                condition_on_previous_text=False,
+                vad_filter=True,
+                **transcribe_kwargs
+            )
             raw_segments = list(segments_gen)
             device_used = "cuda"
         except Exception as exc:
-            logger.exception("Whisper CUDA transcription failed")
-            _check_and_raise_download_error(exc)
+            logger.warning(
+                "CUDA transcription failed (%s: %s). Falling back to CPU.",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            cpu_compute = "int8" if configured_compute == "auto" else configured_compute
+            try:
+                model = WhisperModel(
+                    model_size,
+                    device="cpu",
+                    compute_type=cpu_compute,
+                    download_root=str(model_dir),
+                    cpu_threads=threads,
+                )
+                segments_gen, info = model.transcribe(
+                    audio_array,
+                    task="translate",
+                    language="hi",
+                    condition_on_previous_text=False,
+                    vad_filter=True,
+                    **transcribe_kwargs
+                )
+                raw_segments = list(segments_gen)
+                device_used = "cpu"
+            except Exception as cpu_exc:
+                logger.exception("Whisper CPU fallback transcription failed")
+                _check_and_raise_download_error(cpu_exc)
 
     else:
         cpu_compute = "int8" if configured_compute == "auto" else configured_compute
@@ -368,7 +454,14 @@ def transcribe_audio_file(
                 download_root=str(model_dir),
                 cpu_threads=threads,
             )
-            segments_gen, info = model.transcribe(audio_array, **transcribe_kwargs)
+            segments_gen, info = model.transcribe(
+                audio_array,
+                task="translate",
+                language="hi",
+                condition_on_previous_text=False,
+                vad_filter=True,
+                **transcribe_kwargs
+            )
             raw_segments = list(segments_gen)
             device_used = "cpu"
         except Exception as exc:

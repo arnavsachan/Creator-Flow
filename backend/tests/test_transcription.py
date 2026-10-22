@@ -347,8 +347,8 @@ def test_cuda_error_during_transcribe_falls_back_to_cpu(setup_test_db: Settings)
 
 def test_empty_and_non_empty_language_and_initial_prompt(setup_test_db: Settings):
     """
-    Empty language/prompt are NOT passed to transcribe; non-empty are;
-    WHISPER_INITIAL_PROMPT=off disables the prompt.
+    Verifies task='translate' and language='hi' are explicitly passed to transcribe,
+    and initial_prompt is completely excluded.
     """
     audio_array = np.zeros(16000, dtype=np.float32)
 
@@ -357,7 +357,7 @@ def test_empty_and_non_empty_language_and_initial_prompt(setup_test_db: Settings
     class FakeSegment:
         start = 0.0
         end = 1.0
-        text = "testing prompt"
+        text = "testing translation"
 
     class FakeInfo:
         language = "hi"
@@ -374,28 +374,13 @@ def test_empty_and_non_empty_language_and_initial_prompt(setup_test_db: Settings
     fake_module.WhisperModel = mock_whisper_cls
 
     with patch.dict("sys.modules", {"faster_whisper": fake_module}):
-        # Case 1: Empty language, non-empty default prompt
-        setup_test_db.WHISPER_LANGUAGE = ""
         transcription_module.transcribe_audio_file(audio_array, setup_test_db)
-        k1 = passed_kwargs[-1]
-        assert "language" not in k1
-        assert "initial_prompt" in k1
-        assert "vad_filter" in k1
-        assert k1["vad_filter"] is True
-
-        # Case 2: Specified language and initial_prompt='off'
-        setup_test_db.WHISPER_LANGUAGE = "hi"
-        setup_test_db.WHISPER_INITIAL_PROMPT = "off"
-        transcription_module.transcribe_audio_file(audio_array, setup_test_db)
-        k2 = passed_kwargs[-1]
-        assert k2.get("language") == "hi"
-        assert "initial_prompt" not in k2
-
-        # Case 3: Empty prompt
-        setup_test_db.WHISPER_INITIAL_PROMPT = ""
-        transcription_module.transcribe_audio_file(audio_array, setup_test_db)
-        k3 = passed_kwargs[-1]
-        assert "initial_prompt" not in k3
+        k = passed_kwargs[-1]
+        assert k.get("language") == "hi"
+        assert k.get("task") == "translate"
+        assert "initial_prompt" not in k
+        assert "prefix" not in k
+        assert k.get("vad_filter") is True
 
 
 def test_zero_segments_state_is_done(
@@ -555,3 +540,64 @@ def test_sidecar_filenames_never_contain_user_filenames(
         assert "malicious" not in f_name
         assert "special" not in f_name
         assert "user" not in f_name
+
+
+def test_setup_windows_cuda_dlls_safe_execution(monkeypatch):
+    """
+    Verifies that setup_windows_cuda_dlls runs safely without throwing exceptions,
+    and correctly handles Windows environments.
+    """
+    # Test on os.name == 'nt'
+    monkeypatch.setattr("os.name", "nt")
+    transcription_module.setup_windows_cuda_dlls()
+
+    # Test on non-Windows
+    monkeypatch.setattr("os.name", "posix")
+    transcription_module.setup_windows_cuda_dlls()
+
+
+def test_transcribe_speech_whisper_cuda_fallback(monkeypatch, setup_test_db):
+    """
+    Verifies that if configured for 'cuda' and CUDA throws at runtime,
+    transcribe_speech_whisper falls back to CPU and returns successfully.
+    """
+    settings = setup_test_db
+    settings.WHISPER_DEVICE = "cuda"
+
+    dummy_audio = np.zeros(16000, dtype=np.float32)
+
+    cuda_call_count = 0
+    cpu_call_count = 0
+
+    class MockSegment:
+        def __init__(self, start, end, text):
+            self.start = start
+            self.end = end
+            self.text = text
+
+    class MockWhisperModel:
+        def __init__(self, model_size, device="cpu", **kwargs):
+            nonlocal cuda_call_count, cpu_call_count
+            self.device = device
+            if device == "cuda":
+                cuda_call_count += 1
+                raise RuntimeError("CUDA out of memory or missing DLL")
+            else:
+                cpu_call_count += 1
+
+        def transcribe(self, audio, **kwargs):
+            info = MagicMock()
+            info.language = "en"
+            return ([MockSegment(0.0, 1.0, "Fallback hello")], info)
+
+    with patch("faster_whisper.WhisperModel", MockWhisperModel):
+        segments, lang, model_sz, dev_used = transcription_module.transcribe_audio_file(
+            audio_array=dummy_audio,
+            settings=settings,
+        )
+
+    assert cuda_call_count == 1
+    assert cpu_call_count == 1
+    assert dev_used == "cpu"
+    assert len(segments) == 1
+    assert segments[0]["text"] == "Fallback hello"

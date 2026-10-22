@@ -368,10 +368,30 @@ def create_highlight_clips(
     else:
         return []
 
-    # 4. Validate that all requested suggestion IDs exist in saved_suggestions
+    # 4. Validate that all requested suggestion IDs exist in saved_suggestions (or match resiliently via payload)
     for sid in ids_to_process:
         if sid not in saved_suggestions:
-            raise MediaValidationError("SUGGESTION_NOT_FOUND")
+            matched = None
+            if suggestions:
+                for sug in suggestions:
+                    if sug.id == sid or f"{sug.start}_{sug.end}" == sid:
+                        matched = sug
+                        break
+                if not matched and len(suggestions) == len(ids_to_process):
+                    idx = ids_to_process.index(sid)
+                    matched = suggestions[idx]
+            if matched:
+                item_dict = {
+                    "id": sid,
+                    "start": float(matched.start),
+                    "end": float(matched.end),
+                    "title": matched.title or "Highlight",
+                    "reason": matched.reason or "",
+                    "status": matched.status or "suggested",
+                }
+                saved_suggestions[sid] = item_dict
+            else:
+                raise MediaValidationError("SUGGESTION_NOT_FOUND")
 
     # 5. Persist the updated/recovered suggestions to highlights_file so future queries or status checks find them
     try:
