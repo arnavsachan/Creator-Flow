@@ -1,6 +1,5 @@
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 import json
 
 from pydantic import field_validator, model_validator
@@ -25,6 +24,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] | str = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
     ]
     DOCS_URL: str | None = "/docs"
     FRONTEND_URL: str = "http://localhost:5173"
@@ -39,6 +42,49 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "creatorflow-default-jwt-secret-key-for-development"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
+    # Google Gemini AI Configuration (Thumbnail Lab & Script Studio)
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_FALLBACK_MODEL: str | None = "gemini-flash-lite-latest"
+    # Coordinated timeout budget:
+    # - Multimodal Thumbnail Vision SDK: 25.0s (Backend limit; Frontend client timeout: 30.0s)
+    # - Title Text Optimization SDK: 20.0s (Backend limit; Frontend client timeout: 25.0s)
+    GEMINI_TIMEOUT_SECONDS: float = 25.0
+    GEMINI_TITLE_TIMEOUT_SECONDS: float = 20.0
+
+    @property
+    def is_google_oauth_configured(self) -> bool:
+        """
+        Validates that Google OAuth Client ID and Secret are configured with non-empty,
+        non-placeholder values following the official Google Web client format.
+        """
+        cid = (self.GOOGLE_CLIENT_ID or "").strip()
+        sec = (self.GOOGLE_CLIENT_SECRET or "").strip()
+        if not cid or not sec:
+            return False
+        if any(ph in cid.lower() for ph in ["your-google-client-id", "placeholder", "replace-with", "example"]):
+            return False
+        if not cid.endswith(".apps.googleusercontent.com") or "-" not in cid:
+            return False
+        if any(ph in sec.lower() for ph in ["your-google-client-secret", "placeholder", "replace-with", "example"]):
+            return False
+        if len(sec) < 10:
+            return False
+        return True
+
+    @property
+    def google_cloud_project_number(self) -> Optional[str]:
+        """
+        Extracts the numeric Google Cloud project number from GOOGLE_CLIENT_ID if present.
+        Example: '737022823471-xxx.apps.googleusercontent.com' -> '737022823471'
+        """
+        cid = (self.GOOGLE_CLIENT_ID or "").strip()
+        if "-" in cid:
+            prefix = cid.split("-")[0]
+            if prefix.isdigit():
+                return prefix
+        return None
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -67,6 +113,32 @@ class Settings(BaseSettings):
         return self
 
 
-@lru_cache
+_settings: Optional[Settings] = None
+_settings_env_mtime: float = -1.0
+
+
 def get_settings() -> Settings:
-    return Settings()
+    """
+    Returns application settings, automatically invalidating the cached instance
+    if the underlying .env file is modified on disk.
+    """
+    global _settings, _settings_env_mtime
+    current_mtime = -1.0
+    if ENV_FILE.exists():
+        try:
+            current_mtime = ENV_FILE.stat().st_mtime
+        except OSError:
+            pass
+    if _settings is None or current_mtime != _settings_env_mtime:
+        _settings = Settings()
+        _settings_env_mtime = current_mtime
+    return _settings
+
+
+def _clear_settings_cache() -> None:
+    global _settings, _settings_env_mtime
+    _settings = None
+    _settings_env_mtime = -1.0
+
+
+get_settings.cache_clear = _clear_settings_cache

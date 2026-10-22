@@ -7,6 +7,7 @@ from fastapi import HTTPException, status
 import httpx
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.channel import ConnectedChannel
 from app.schemas.youtube import (
     AnalyticsDayPoint,
@@ -25,6 +26,16 @@ from app.services.youtube_oauth import (
 logger = logging.getLogger(__name__)
 
 YOUTUBE_ANALYTICS_REPORTS_URL = "https://youtubeanalytics.googleapis.com/v2/reports"
+
+
+def get_service_disabled_message() -> str:
+    settings = get_settings()
+    proj_num = settings.google_cloud_project_number
+    proj_str = f" ({proj_num})" if proj_num else ""
+    return (
+        f"YouTube Analytics API is not enabled in your Google Cloud project{proj_str}. "
+        "Please enable the API in Google Cloud Console and retry."
+    )
 
 # Friendly labels for Google insightTrafficSourceType dimensions
 TRAFFIC_SOURCE_LABELS: dict[str, str] = {
@@ -277,7 +288,7 @@ def fetch_channel_overview_report(
                 average_view_duration_seconds=0,
                 net_subscribers=0,
                 time_series=[],
-                message="YouTube Analytics API is not enabled in your Google Cloud project (198142014140). Please enable the API in Google Cloud Console and retry.",
+                message=get_service_disabled_message(),
             )
         raise
 
@@ -422,7 +433,7 @@ def fetch_traffic_sources_report(
                 days=days,
                 total_views=0,
                 traffic_sources=[],
-                message="YouTube Analytics API is not enabled in your Google Cloud project (198142014140). Please enable the API in Google Cloud Console and retry.",
+                message=get_service_disabled_message(),
             )
         raise
 
@@ -547,7 +558,7 @@ def fetch_geography_report(
                 days=days,
                 total_views=0,
                 top_countries=[],
-                message="YouTube Analytics API is not enabled in your Google Cloud project (198142014140). Please enable the API in Google Cloud Console and retry.",
+                message=get_service_disabled_message(),
             )
         raise
 

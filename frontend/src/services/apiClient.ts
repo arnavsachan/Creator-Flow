@@ -67,6 +67,8 @@ export function normalizeApiError(error: any): NormalizedApiError {
     code = body.error.code;
   } else if (typeof body?.code === 'string') {
     code = body.code;
+  } else if (typeof error.code === 'string') {
+    code = error.code;
   }
 
   let message: string | undefined = undefined;
@@ -152,6 +154,14 @@ apiClient.interceptors.response.use(
   (error) => {
     if (axios.isCancel(error)) {
       return Promise.reject(error);
+    }
+    if (error.response?.status === 401) {
+      // Immediately purge invalid/expired auth_token so subsequent calls don't send dead credentials
+      try {
+        localStorage.removeItem('auth_token');
+      } catch {
+        // Guard against SSR or private browsing security restrictions
+      }
     }
     const normalizedError = normalizeApiError(error);
     return Promise.reject(normalizedError);

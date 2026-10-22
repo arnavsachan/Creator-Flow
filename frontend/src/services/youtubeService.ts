@@ -17,34 +17,87 @@ import type {
 } from '../types/youtube';
 
 /**
- * Ensures an application user session is available.
- * If no auth token is stored in localStorage, creates/retrieves a demo session.
+ * Safely parses and validates that a JWT string is well-formed and unexpired.
+ * Includes a 30-second clock skew buffer.
  */
-export async function ensureAuthenticatedSession(): Promise<string> {
+export function isJwtActive(token: string | null): boolean {
+  if (!token || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const base64Url = parts[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    const parsed = JSON.parse(jsonPayload);
+    if (typeof parsed.exp === 'number') {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      if (nowSeconds >= parsed.exp - 30) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensures an application user session is available and unexpired.
+ * If no auth token is stored in localStorage or if the stored token is expired/invalid,
+ * clears the stale token and creates/retrieves a fresh demo session.
+ */
+export async function ensureAuthenticatedSession(forceRefresh = false): Promise<string> {
   const existingToken = localStorage.getItem('auth_token');
-  if (existingToken) {
-    return existingToken;
+  if (!forceRefresh && isJwtActive(existingToken)) {
+    return existingToken!;
+  }
+  try {
+    localStorage.removeItem('auth_token');
+  } catch {
+    // Guard against private browsing storage restrictions
   }
   const response = await apiClient.post<{ access_token: string }>('/auth/demo-session');
   const token = response.data.access_token;
-  localStorage.setItem('auth_token', token);
+  try {
+    localStorage.setItem('auth_token', token);
+  } catch {
+    // Guard against private browsing storage restrictions
+  }
   return token;
 }
 
 /**
  * Checks YouTube connection status for the current authenticated user.
+ * Automatically recovers if the stored application token was rejected.
  */
 export async function getConnectionStatus(signal?: AbortSignal): Promise<ConnectionStatusResponse> {
   await ensureAuthenticatedSession();
-  const response = await apiClient.get<ConnectionStatusResponse>('/youtube/connection-status', {
-    signal,
-  });
-  return response.data;
+  try {
+    const response = await apiClient.get<ConnectionStatusResponse>('/youtube/connection-status', {
+      signal,
+    });
+    return response.data;
+  } catch (err: any) {
+    if (err?.kind === 'unauthorized' || err?.status === 401) {
+      await ensureAuthenticatedSession(true);
+      const retryRes = await apiClient.get<ConnectionStatusResponse>('/youtube/connection-status', {
+        signal,
+      });
+      return retryRes.data;
+    }
+    throw err;
+  }
 }
 
 /**
  * Initiates the YouTube OAuth flow and returns the Google authorization URL.
  * If includeAnalytics is true, requests the yt-analytics.readonly scope.
+ * Automatically recovers if the stored application token was rejected.
  */
 export async function startOAuth(
   options?: { includeAnalytics?: boolean },
@@ -52,11 +105,23 @@ export async function startOAuth(
 ): Promise<OAuthStartResponse> {
   await ensureAuthenticatedSession();
   const params = options?.includeAnalytics ? { include_analytics: true } : undefined;
-  const response = await apiClient.get<OAuthStartResponse>('/youtube/oauth/start', {
-    params,
-    signal,
-  });
-  return response.data;
+  try {
+    const response = await apiClient.get<OAuthStartResponse>('/youtube/oauth/start', {
+      params,
+      signal,
+    });
+    return response.data;
+  } catch (err: any) {
+    if (err?.kind === 'unauthorized' || err?.status === 401) {
+      await ensureAuthenticatedSession(true);
+      const retryRes = await apiClient.get<OAuthStartResponse>('/youtube/oauth/start', {
+        params,
+        signal,
+      });
+      return retryRes.data;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -64,8 +129,17 @@ export async function startOAuth(
  */
 export async function disconnectChannel(signal?: AbortSignal): Promise<DisconnectResponse> {
   await ensureAuthenticatedSession();
-  const response = await apiClient.post<DisconnectResponse>('/youtube/disconnect', {}, { signal });
-  return response.data;
+  try {
+    const response = await apiClient.post<DisconnectResponse>('/youtube/disconnect', {}, { signal });
+    return response.data;
+  } catch (err: any) {
+    if (err?.kind === 'unauthorized' || err?.status === 401) {
+      await ensureAuthenticatedSession(true);
+      const retryRes = await apiClient.post<DisconnectResponse>('/youtube/disconnect', {}, { signal });
+      return retryRes.data;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -73,8 +147,17 @@ export async function disconnectChannel(signal?: AbortSignal): Promise<Disconnec
  */
 export async function syncChannel(signal?: AbortSignal): Promise<ConnectedChannel> {
   await ensureAuthenticatedSession();
-  const response = await apiClient.post<ConnectedChannel>('/youtube/sync', {}, { signal });
-  return response.data;
+  try {
+    const response = await apiClient.post<ConnectedChannel>('/youtube/sync', {}, { signal });
+    return response.data;
+  } catch (err: any) {
+    if (err?.kind === 'unauthorized' && String(err?.message || '').toLowerCase().includes('token')) {
+      await ensureAuthenticatedSession(true);
+      const retryRes = await apiClient.post<ConnectedChannel>('/youtube/sync', {}, { signal });
+      return retryRes.data;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -260,6 +343,7 @@ export async function getContentLibrary(
 }
 
 export default {
+  isJwtActive,
   ensureAuthenticatedSession,
   getConnectionStatus,
   startOAuth,

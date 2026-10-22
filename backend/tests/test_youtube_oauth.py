@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -253,13 +254,13 @@ def test_channel_already_connected_to_another_user_rule(
     assert status_a.json()["channel"]["channelId"] == "UC_EXCLUSIVE_CHANNEL_1"
 
 
-@patch("app.services.youtube_oauth.httpx.Client.post")
+@patch("app.services.youtube_oauth.httpx.Client")
 @patch("app.services.youtube_oauth.fetch_youtube_channel_profile")
 @patch("app.services.youtube_oauth.exchange_code_for_tokens")
 def test_disconnect_channel_wipes_credentials_and_preserves_metrics(
     mock_exchange: MagicMock,
     mock_fetch_channel: MagicMock,
-    mock_httpx_post: MagicMock,
+    mock_httpx_client: MagicMock,
     client: TestClient,
     auth_user_a: dict,
     db_session: Session,
@@ -627,6 +628,9 @@ def test_channel_recent_videos_discovery_and_persistence(client: TestClient, db_
     assert len(videos) == 2
     assert videos[0].view_count in (4520, 8900)
 
+    # Undo monkeypatch on httpx.Client so TestClient requests hit FastAPI
+    monkeypatch.undo()
+
     # Test GET /videos endpoint
     res = client.get("/api/v1/youtube/videos?channel_id=UC_VID_TEST")
     assert res.status_code == 200
@@ -875,10 +879,12 @@ def test_expired_token_handling_marks_channel_expired_and_returns_401(client: Te
     db_session.commit()
 
     # Mock Google token refresh to return HTTP 400 (invalid_grant)
+    original_post = httpx.Client.post
+
     def mock_post(self, url, data=None, **kwargs):
-        if "oauth2.googleapis.com/token" in url:
+        if "oauth2.googleapis.com/token" in str(url):
             return httpx.Response(400, json={"error": "invalid_grant", "error_description": "Token has been expired or revoked."})
-        return httpx.Response(404)
+        return original_post(self, url, data=data, **kwargs)
 
     monkeypatch.setattr(httpx.Client, "post", mock_post)
 
@@ -957,3 +963,468 @@ def test_analytics_and_audience_scope_limitation_disclosure(client: TestClient, 
     assert au_data["topCountries"] is None
     assert au_data["returningViewersRate"] is None
     assert "YouTube Analytics Partner API permissions" in au_data["scopeLimitationNotice"]
+
+
+# ==============================================================================
+# OAuth Configuration & Credentials Validation Tests (Error 401: invalid_client Guard)
+# ==============================================================================
+
+def test_oauth_start_fails_when_client_id_missing(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 503
+    data = res.json()
+    assert "GOOGLE_CLIENT_ID" in data["detail"]
+    assert "not properly configured" in data["detail"]
+
+
+def test_oauth_start_fails_when_client_secret_missing(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 503
+    data = res.json()
+    assert "GOOGLE_CLIENT_SECRET" in data["detail"]
+
+
+def test_oauth_start_fails_when_placeholder_client_id(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "your-google-client-id.apps.googleusercontent.com")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 503
+    assert "GOOGLE_CLIENT_ID" in res.json()["detail"]
+
+
+def test_oauth_start_fails_when_placeholder_client_secret(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "your-google-client-secret")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 503
+    assert "GOOGLE_CLIENT_SECRET" in res.json()["detail"]
+
+
+def test_oauth_start_fails_when_invalid_client_id_format(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "not-a-google-client-id")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 503
+
+
+def test_oauth_start_with_custom_valid_redirect_uri(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    target_uri = "http://localhost:8000/api/v1/youtube/oauth/callback"
+    res = client.get(
+        f"/api/v1/youtube/oauth/start?redirect_uri={target_uri}",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    auth_url = data.get("authorizationUrl") or data.get("authorization_url")
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A8000%2Fapi%2Fv1%2Fyoutube%2Foauth%2Fcallback" in auth_url
+
+    # Check redirect_uri stored on OAuthState in db
+    db_state = db_session.query(OAuthState).filter(OAuthState.state == data["state"]).first()
+    assert db_state is not None
+    assert db_state.redirect_uri == target_uri
+
+
+def test_oauth_start_with_invalid_redirect_uri(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start?redirect_uri=not-a-valid-url",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 400
+    assert "Invalid redirect_uri" in res.json()["detail"]
+
+
+def test_oauth_start_include_analytics_scope(
+    client: TestClient,
+    auth_user_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    res = client.get(
+        "/api/v1/youtube/oauth/start?include_analytics=true",
+        headers={"Authorization": f"Bearer {auth_user_a['access_token']}"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    auth_url = data.get("authorizationUrl") or data.get("authorization_url")
+    assert "yt-analytics.readonly" in auth_url
+    assert data["includeAnalytics"] is True
+
+
+def test_oauth_callback_fails_when_credentials_unconfigured(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "")
+    get_settings.cache_clear()
+
+    res = client.post(
+        "/api/v1/youtube/oauth/callback",
+        json={"code": "dummy_code", "state": "dummy_state"},
+    )
+    # Fails immediately before or at state validation / credential validation
+    assert res.status_code in (400, 503)
+
+
+def test_refresh_token_fails_when_credentials_unconfigured(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.core.config import get_settings
+    from app.core.security import encrypt_token
+    from app.services.youtube_oauth import refresh_access_token
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "your-google-client-id.apps.googleusercontent.com")
+    get_settings.cache_clear()
+
+    channel = ConnectedChannel(
+        id="chan_test_reauth",
+        user_id="user_reauth",
+        platform="youtube",
+        channel_id="UC_REAUTH",
+        title="Reauth Channel",
+        encrypted_refresh_token=encrypt_token("1//dummy_refresh_token"),
+        status="connected",
+    )
+    db_session.add(channel)
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        refresh_access_token(db_session, channel)
+    assert exc_info.value.status_code == 503
+    assert "not properly configured" in exc_info.value.detail
+
+
+def test_refresh_access_token_success_and_persistence(db_session: Session, monkeypatch: pytest.MonkeyPatch):
+    import httpx
+    from app.core.config import get_settings
+    from app.core.security import encrypt_token, decrypt_token
+    from app.services.youtube_oauth import refresh_access_token
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    # Channel with expired access token and valid refresh token
+    ch = ConnectedChannel(
+        id="chan_refresh_success",
+        user_id="user_refresh_1",
+        platform="youtube",
+        channel_id="UC_REFRESH_SUCCESS",
+        title="Refresh Success Channel",
+        encrypted_access_token=encrypt_token("ya29.old_expired_access_token"),
+        encrypted_refresh_token=encrypt_token("1//valid_refresh_token_xyz"),
+        token_expires_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        status="connected",
+    )
+    db_session.add(ch)
+    db_session.commit()
+
+    # Mock Google OAuth token refresh response
+    fresh_token = "ya29.brand_new_access_token_777"
+    def mock_post(self, url, data=None, **kwargs):
+        if "oauth2.googleapis.com/token" in str(url):
+            assert data["grant_type"] == "refresh_token"
+            assert data["refresh_token"] == "1//valid_refresh_token_xyz"
+            return httpx.Response(200, json={
+                "access_token": fresh_token,
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/youtube.readonly",
+            })
+        raise RuntimeError("Unexpected request")
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    returned_token = refresh_access_token(db_session, ch)
+    assert returned_token == fresh_token
+
+    # Verify persistence in database
+    db_session.refresh(ch)
+    assert ch.status == "connected"
+    expires_at = ch.token_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    assert expires_at > datetime.now(timezone.utc) + timedelta(minutes=50)
+    assert decrypt_token(ch.encrypted_access_token) == fresh_token
+
+
+def test_refresh_access_token_missing_refresh_token(db_session: Session, monkeypatch: pytest.MonkeyPatch):
+    from app.core.config import get_settings
+    from app.core.security import encrypt_token
+    from app.services.youtube_oauth import refresh_access_token
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    ch = ConnectedChannel(
+        id="chan_no_refresh",
+        user_id="user_no_refresh",
+        platform="youtube",
+        channel_id="UC_NO_REFRESH",
+        title="No Refresh Channel",
+        encrypted_access_token=encrypt_token("ya29.old_token"),
+        encrypted_refresh_token=None,
+        token_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        status="connected",
+    )
+    db_session.add(ch)
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        refresh_access_token(db_session, ch)
+
+    assert exc_info.value.status_code == 401
+    assert "No refresh token available" in exc_info.value.detail
+    assert "reconnect your youtube channel" in exc_info.value.detail.lower()
+
+    db_session.refresh(ch)
+    assert ch.status == "expired"
+
+
+def test_refresh_access_token_revoked_invalid_grant(db_session: Session, monkeypatch: pytest.MonkeyPatch):
+    import httpx
+    from app.core.config import get_settings
+    from app.core.security import encrypt_token
+    from app.services.youtube_oauth import refresh_access_token
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    ch = ConnectedChannel(
+        id="chan_revoked",
+        user_id="user_revoked",
+        platform="youtube",
+        channel_id="UC_REVOKED",
+        title="Revoked Channel",
+        encrypted_access_token=encrypt_token("ya29.old_token"),
+        encrypted_refresh_token=encrypt_token("1//revoked_token"),
+        token_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        status="connected",
+    )
+    db_session.add(ch)
+    db_session.commit()
+
+    def mock_post(self, url, data=None, **kwargs):
+        if "oauth2.googleapis.com/token" in str(url):
+            return httpx.Response(400, json={
+                "error": "invalid_grant",
+                "error_description": "Token has been expired or revoked.",
+            })
+        raise RuntimeError("Unexpected request")
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    with pytest.raises(HTTPException) as exc_info:
+        refresh_access_token(db_session, ch)
+
+    assert exc_info.value.status_code == 401
+    assert "invalid_grant" in exc_info.value.detail
+    assert "reconnect" in exc_info.value.detail.lower()
+
+    db_session.refresh(ch)
+    assert ch.status == "expired"
+
+
+def test_refresh_access_token_decryption_failure_key_mismatch(db_session: Session, monkeypatch: pytest.MonkeyPatch):
+    from app.core.config import get_settings
+    from app.services.youtube_oauth import refresh_access_token
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "123456789012-abc123def456ghi789jkl012mno345pq.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-validsecret123456789012345678")
+    get_settings.cache_clear()
+
+    # Corrupt or mismatched Fernet token ciphertext
+    ch = ConnectedChannel(
+        id="chan_corrupt_key",
+        user_id="user_corrupt_key",
+        platform="youtube",
+        channel_id="UC_CORRUPT_KEY",
+        title="Corrupt Key Channel",
+        encrypted_access_token="gAAAAABnotavalidfernettokenabc123",
+        encrypted_refresh_token="gAAAAABnotavalidfernettokenxyz456",
+        token_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        status="connected",
+    )
+    db_session.add(ch)
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        refresh_access_token(db_session, ch)
+
+    assert exc_info.value.status_code == 401
+    assert "encryption key mismatch" in exc_info.value.detail.lower()
+    assert "reconnect" in exc_info.value.detail.lower()
+
+    db_session.refresh(ch)
+    assert ch.status == "expired"
+
+
+@patch("app.services.youtube_oauth.fetch_youtube_channel_profile")
+@patch("app.services.youtube_oauth.exchange_code_for_tokens")
+def test_reconnect_flow_updates_existing_expired_channel_without_duplicates(
+    mock_exchange: MagicMock,
+    mock_fetch_channel: MagicMock,
+    client: TestClient,
+    auth_user_a: dict,
+    db_session: Session,
+):
+    from app.core.security import encrypt_token, decrypt_token
+
+    user_id = auth_user_a["user"]["id"]
+    token = auth_user_a["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Pre-populate an expired channel record
+    expired_channel = ConnectedChannel(
+        user_id=user_id,
+        platform="youtube",
+        channel_id="UC_RECONNECT_TARGET",
+        title="Old Expired Channel Name",
+        custom_url="@OldExpiredHandle",
+        subscriber_count=1000,
+        video_count=10,
+        view_count=50000,
+        encrypted_access_token=encrypt_token("ya29.old_expired_access"),
+        encrypted_refresh_token=encrypt_token("1//old_revoked_refresh"),
+        status="expired",
+        token_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    db_session.add(expired_channel)
+    db_session.commit()
+
+    # Verify initial count
+    initial_count = db_session.query(ConnectedChannel).filter(ConnectedChannel.user_id == user_id).count()
+    assert initial_count == 1
+
+    # Verify connection status reports connected=False with channel metadata for reconnect UI
+    status_res = client.get("/api/v1/youtube/connection-status", headers=headers)
+    assert status_res.status_code == 200
+    status_data = status_res.json()
+    assert status_data["connected"] is False
+    assert status_data["channel"] is not None
+    assert status_data["channel"]["channelId"] == "UC_RECONNECT_TARGET"
+    assert status_data["channel"]["status"] == "expired"
+
+    # Now simulate user initiating reconnect and completing OAuth callback
+    start_res = client.get("/api/v1/youtube/oauth/start", headers=headers)
+    assert start_res.status_code == 200
+    state = start_res.json()["state"]
+
+    new_access = "ya29.fresh_reconnected_access_token"
+    new_refresh = "1//fresh_reconnected_refresh_token"
+    mock_exchange.return_value = {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+        "expires_in": 3600,
+        "scope": "https://www.googleapis.com/auth/youtube.readonly",
+    }
+    mock_fetch_channel.return_value = {
+        "id": "UC_RECONNECT_TARGET",
+        "snippet": {
+            "title": "Fresh Reconnected Channel Name",
+            "customUrl": "@FreshHandle",
+            "thumbnails": {"medium": {"url": "https://yt.ggpht.com/fresh.jpg"}},
+        },
+        "statistics": {
+            "subscriberCount": "2500",
+            "videoCount": "25",
+            "viewCount": "125000",
+        },
+    }
+
+    cb_res = client.post(
+        "/api/v1/youtube/oauth/callback",
+        json={"code": "fresh_auth_code", "state": state},
+    )
+    assert cb_res.status_code == 200
+    cb_data = cb_res.json()
+    assert cb_data["channelId"] == "UC_RECONNECT_TARGET"
+    assert cb_data["title"] == "Fresh Reconnected Channel Name"
+    assert cb_data["status"] == "connected"
+
+    # Verify NO duplicate channel rows were created
+    total_count = db_session.query(ConnectedChannel).filter(ConnectedChannel.user_id == user_id).count()
+    assert total_count == 1
+
+    # Verify row in DB is fully restored to "connected" with updated encrypted tokens
+    updated_channel = db_session.query(ConnectedChannel).filter(ConnectedChannel.channel_id == "UC_RECONNECT_TARGET").first()
+    assert updated_channel is not None
+    assert updated_channel.status == "connected"
+    assert decrypt_token(updated_channel.encrypted_access_token) == new_access
+    assert decrypt_token(updated_channel.encrypted_refresh_token) == new_refresh
+    assert updated_channel.title == "Fresh Reconnected Channel Name"

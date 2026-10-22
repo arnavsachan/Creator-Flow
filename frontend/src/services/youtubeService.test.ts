@@ -13,10 +13,16 @@ vi.mock('./apiClient', () => ({
   },
 }));
 
+const validJwt =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzEyMyIsImV4cCI6OTk5OTk5OTk5OX0.c2lnbmF0dXJl';
+
 describe('youtubeService - YouTube Data API v3', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    localStorage.setItem('auth_token', 'mock_valid_token');
+    localStorage.setItem('auth_token', validJwt);
+    (apiClient.post as any).mockResolvedValue({
+      data: { access_token: validJwt },
+    });
   });
 
   describe('getChannelDetails', () => {

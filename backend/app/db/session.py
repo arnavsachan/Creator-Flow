@@ -66,7 +66,7 @@ def check_database() -> bool:
     """
     Non-destructive check that runs SELECT 1.
     Returns True if reachable, False otherwise.
-    Never logs credentials or connection strings; logs only the exception class name.
+    Never logs credentials or connection strings; logs only a safe error category and exception class name.
     """
     try:
         engine = get_engine()
@@ -74,7 +74,18 @@ def check_database() -> bool:
             conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
-        logger.warning("Database connectivity check failed: %s", type(e).__name__)
+        err_msg = str(e).lower()
+        if "password authentication failed" in err_msg or "authentication failed" in err_msg:
+            category = "authentication_failed"
+        elif "connection refused" in err_msg:
+            category = "connection_refused"
+        elif "timeout" in err_msg or "timed out" in err_msg:
+            category = "connection_timeout"
+        elif "does not exist" in err_msg:
+            category = "database_not_found"
+        else:
+            category = "operational_error"
+        logger.warning("Database connectivity check failed: %s (%s)", type(e).__name__, category)
         return False
 
 
