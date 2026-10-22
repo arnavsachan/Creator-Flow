@@ -175,6 +175,9 @@ export interface ChannelVideoItem {
   publishedAt: string;
   relativePublished: string;
   thumbnailUrl?: string | null;
+  duration?: string | null;
+  durationSeconds?: number | null;
+  description?: string | null;
   viewCount: number;
   likeCount?: number | null;
   commentCount?: number | null;
@@ -185,5 +188,76 @@ export interface ChannelVideosResponse {
   channelId: string;
   dataState: string;
   videos: ChannelVideoItem[];
+  message?: string | null;
+}
+
+export interface ChannelDetailsResponse {
+  channelId: string;
+  dataState: string;
+  isLive: boolean;
+  title: string;
+  description?: string;
+  customUrl?: string | null;
+  publishedAt?: string | null;
+  thumbnailUrl?: string | null;
+  thumbnails?: Record<string, string> | null;
+  bannerImageUrl?: string | null;
+  country?: string | null;
+  defaultLanguage?: string | null;
+  subscriberCount: number;
+  hiddenSubscriberCount: boolean;
+  videoCount: number;
+  viewCount: number;
+  topicCategories: string[];
+  keywords?: string | null;
+  uploadsPlaylistId?: string | null;
+  privacyStatus?: string | null;
+  hasDataScope: boolean;
+  authorizationUrl?: string | null;
+  message?: string | null;
+}
+
+export interface ContentVideoItem {
+  videoId: string;
+  channelId: string;
+  channelTitle?: string | null;
+  title: string;
+  description?: string;
+  publishedAt: string;
+  relativePublished: string;
+  thumbnailUrl?: string | null;
+  thumbnails?: Record<string, string> | null;
+  duration?: string | null;
+  durationIso?: string | null;
+  durationSeconds?: number | null;
+  viewCount: number;
+  likeCount?: number | null;
+  commentCount?: number | null;
+  tags: string[];
+  privacyStatus?: string | null;
+  definition?: string | null;
+  hasCaption: boolean;
+}
+
+export interface ContentLibraryParams {
+  channelId?: string;
+  pageToken?: string;
+  maxResults?: number;
+  q?: string;
+  order?: 'date' | 'views' | 'likes' | 'title';
+}
+
+export interface ContentLibraryResponse {
+  channelId: string;
+  dataState: string;
+  isLive: boolean;
+  videos: ContentVideoItem[];
+  nextPageToken?: string | null;
+  prevPageToken?: string | null;
+  totalResults: number;
+  resultsPerPage: number;
+  q?: string | null;
+  order?: string | null;
+  authorizationUrl?: string | null;
   message?: string | null;
 }

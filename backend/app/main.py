@@ -4,8 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.auth import router as auth_router
+from app.api.routes.competitors import router as competitors_router
+from app.api.routes.content_plan import router as content_plan_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.health import router as health_router
+from app.api.routes.scripts import router as scripts_router
 from app.api.routes.thumbnails import router as thumbnails_router
 from app.api.routes.youtube import router as youtube_router
 from app.core.config import get_settings
@@ -40,7 +43,10 @@ def create_application() -> FastAPI:
 
     # Mount API v1 routers
     app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(competitors_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(content_plan_router, prefix=settings.API_V1_PREFIX)
     app.include_router(dashboard_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(scripts_router, prefix=settings.API_V1_PREFIX)
     app.include_router(youtube_router, prefix=settings.API_V1_PREFIX)
 
     # Mount thumbnails router under /api/v1 (router has prefix="/thumbnails")

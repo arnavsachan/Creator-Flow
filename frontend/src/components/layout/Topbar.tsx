@@ -35,6 +35,8 @@ export const Topbar: React.FC<TopbarProps> = ({ onRefresh, isSyncing = false }) 
         return 'Audience Insights';
       case '/channels':
         return 'Connected Channels';
+      case '/content-library':
+        return 'Content Library';
       case '/video-ideas':
         return 'Video Ideas & SEO';
       case '/script-generator':

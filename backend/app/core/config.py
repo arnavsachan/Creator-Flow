@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
-    # Google Gemini AI Configuration
-    GEMINI_API_KEY: str | None = None
+    # Google Gemini AI Configuration (Thumbnail Lab & Script Studio)
+    GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_FALLBACK_MODEL: str | None = "gemini-flash-lite-latest"
     # Coordinated timeout budget:
