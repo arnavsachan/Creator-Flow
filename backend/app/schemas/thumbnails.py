@@ -23,6 +23,7 @@ class ImageMetadata(CamelModel):
     file_format: str
     file_size_bytes: int
     is_recommended_resolution: bool
+    sha256_hash: Optional[str] = Field(default=None, description="SHA-256 digest of verified uploaded image bytes")
 
 
 class ThumbnailCriterionScore(CamelModel):
@@ -38,6 +39,7 @@ class ThumbnailScoringRequest(CamelModel):
     filename: Optional[str] = Field(default=None, description="Original filename of the thumbnail")
     title: Optional[str] = Field(default=None, max_length=200, description="Optional proposed video title for alignment audit")
     topic: Optional[str] = Field(default=None, max_length=500, description="Optional video topic or niche context")
+    allow_fallback: bool = Field(default=False, description="Whether to allow heuristic fallback if Gemini API is unconfigured or unavailable")
 
 
 class ThumbnailScoringResponse(CamelModel):
@@ -67,6 +69,7 @@ class TitleScoringRequest(CamelModel):
     topic: Optional[str] = Field(default=None, max_length=500, description="Target topic or video niche")
     description: Optional[str] = Field(default=None, max_length=1000, description="Optional video synopsis or summary")
     thumbnail_context: Optional[str] = Field(default=None, max_length=500, description="Description of paired thumbnail elements")
+    allow_fallback: bool = Field(default=False, description="Whether to allow heuristic fallback if Gemini API is unconfigured or unavailable")
 
 
 class TitleScoringResponse(CamelModel):

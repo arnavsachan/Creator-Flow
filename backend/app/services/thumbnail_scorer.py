@@ -1,5 +1,7 @@
 import base64
 from datetime import datetime, timezone
+import hashlib
+import logging
 import math
 import re
 import struct
@@ -14,6 +16,13 @@ from app.schemas.thumbnails import (
     TitleScoringRequest,
     TitleScoringResponse,
 )
+from app.services.gemini_provider import (
+    GeminiConfigError,
+    GeminiError,
+    get_gemini_provider,
+)
+
+logger = logging.getLogger(__name__)
 
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB limit
 MIN_IMAGE_DIMENSION = 50  # Minimum 50x50 pixels
@@ -131,6 +140,7 @@ def inspect_image_bytes(data: bytes, filename: Optional[str] = None) -> ImageMet
         aspect_str = f"{ratio:.2f}:1"
 
     is_recommended = (width >= 1280 and height >= 720) or (height >= 1280 and width >= 720 and ratio < 1.0)
+    sha256_digest = hashlib.sha256(data).hexdigest()
 
     return ImageMetadata(
         width=width,
@@ -139,7 +149,9 @@ def inspect_image_bytes(data: bytes, filename: Optional[str] = None) -> ImageMet
         file_format=file_format,
         file_size_bytes=file_size,
         is_recommended_resolution=is_recommended,
+        sha256_hash=sha256_digest,
     )
+
 
 
 def compute_byte_entropy(data: bytes) -> float:
@@ -184,17 +196,148 @@ def compute_contrast_diagnostics(data: bytes) -> tuple[float, str]:
     return ratio, badge
 
 
+# ==========================================
+# Primary Scoring Functions (Gemini + Fallback)
+# ==========================================
+
 def score_thumbnail(
     image_bytes: bytes,
     filename: Optional[str] = None,
     title: Optional[str] = None,
     topic: Optional[str] = None,
+    gemini_api_key: Optional[str] = None,
+    allow_fallback: bool = False,
 ) -> ThumbnailScoringResponse:
     """
-    Analyzes an uploaded thumbnail image across visual contrast, composition,
-    readability, clutter, resolution, and title alignment using heuristic diagnostics.
+    Analyzes an uploaded thumbnail image.
+    Uses Google Gemini multimodal AI when configured; falls back gracefully
+    to local heuristic diagnostics if permitted and explicitly labelled.
     """
     metadata = inspect_image_bytes(image_bytes, filename)
+    provider = get_gemini_provider(api_key=gemini_api_key)
+
+    # MIME type detection
+    mime_map = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+    mime_type = mime_map.get(metadata.file_format, "image/png")
+
+    logger.info(
+        "[ThumbnailScorer] Input thumbnail: sha256=%s bytes=%d dims=%dx%d format=%s provider_configured=%s allow_fallback=%s",
+        metadata.sha256_hash,
+        metadata.file_size_bytes,
+        metadata.width,
+        metadata.height,
+        metadata.file_format,
+        provider.is_configured(),
+        allow_fallback,
+    )
+
+    if provider.is_configured():
+        try:
+            analysis = provider.analyze_thumbnail(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                title=title,
+                topic=topic,
+                width=metadata.width,
+                height=metadata.height,
+                aspect_ratio=metadata.aspect_ratio,
+            )
+
+            # Map criteria and compute deterministic overall score
+            criteria: list[ThumbnailCriterionScore] = []
+            for c in analysis.criteria:
+                grade_val = c.grade if c.grade in ("Excellent", "Good", "Needs Improvement", "Poor") else "Good"
+                criteria.append(
+                    ThumbnailCriterionScore(
+                        name=c.name,
+                        score=max(0, min(100, c.score)),
+                        grade=grade_val,  # type: ignore[arg-type]
+                        reasoning=c.reasoning,
+                        suggestions=c.suggestions,
+                    )
+                )
+
+            overall_score = round(sum(c.score for c in criteria) / len(criteria)) if criteria else 75
+            if overall_score >= 90:
+                grade = "A+ Recommended"
+            elif overall_score >= 80:
+                grade = "A High Performing"
+            elif overall_score >= 70:
+                grade = "B Solid Variant"
+            elif overall_score >= 60:
+                grade = "C Needs Polish"
+            else:
+                grade = "D Low Glanceability"
+
+            # Merge objective technical warnings with model suggestions
+            warnings = list(analysis.warnings)
+            if not metadata.is_recommended_resolution and metadata.width < 640:
+                warnings.append("Resolution is below YouTube's minimum 640x360 threshold.")
+            if "16:9" not in metadata.aspect_ratio and "9:16" not in metadata.aspect_ratio:
+                warnings.append(f"Aspect ratio is {metadata.aspect_ratio}; YouTube standard video grid requires 16:9.")
+
+            logger.info(
+                "[ThumbnailScorer] Gemini evaluation successful: sha256=%s model=%s score=%d grade=%s",
+                metadata.sha256_hash,
+                provider.model,
+                overall_score,
+                grade,
+            )
+
+            return ThumbnailScoringResponse(
+                overall_score=overall_score,
+                grade=grade,
+                focal_point=analysis.focal_point,
+                contrast_ratio=analysis.contrast_ratio_estimate,
+                criteria=criteria,
+                suggestions=analysis.suggestions[:5],
+                warnings=warnings,
+                metadata=metadata,
+                provider=f"google-gemini/{provider.model}",
+                provider_note=f"Multimodal AI visual audit performed by Google Gemini ({provider.model}). Canvas dimensions and file format verified by server diagnostics.",
+                evaluated_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+        except GeminiError as err:
+            if not allow_fallback:
+                raise
+            logger.warning(
+                "[ThumbnailScorer] Gemini thumbnail analysis failed (%s); using heuristic fallback for sha256=%s",
+                err.message,
+                metadata.sha256_hash,
+            )
+
+            return score_thumbnail_heuristic(
+                image_bytes=image_bytes,
+                metadata=metadata,
+                title=title,
+                topic=topic,
+                fallback_reason=err.message,
+            )
+
+    # Provider not configured
+    if not allow_fallback:
+        raise GeminiConfigError("Google Gemini API is not configured. Set GEMINI_API_KEY in the backend environment.")
+
+    return score_thumbnail_heuristic(
+        image_bytes=image_bytes,
+        metadata=metadata,
+        title=title,
+        topic=topic,
+        fallback_reason="GEMINI_API_KEY is not configured in backend environment",
+    )
+
+
+def score_thumbnail_heuristic(
+    image_bytes: bytes,
+    metadata: ImageMetadata,
+    title: Optional[str] = None,
+    topic: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
+) -> ThumbnailScoringResponse:
+    """
+    Heuristic visual analysis fallback clearly labeled as such.
+    """
     entropy = compute_byte_entropy(image_bytes)
     contrast_ratio, contrast_badge = compute_contrast_diagnostics(image_bytes)
 
@@ -203,7 +346,6 @@ def score_thumbnail(
     suggestions: list[str] = []
 
     # 1. Contrast & Visual Hierarchy
-    contrast_score: int
     if contrast_ratio >= 12.0:
         contrast_score = 95
         contrast_grade = "Excellent"
@@ -393,13 +535,20 @@ def score_thumbnail(
     else:
         grade = "D Low Glanceability"
 
-    # Default actionable suggestions if list is sparse
     if len(suggestions) < 3:
         suggestions.extend([
             "Verify thumbnail legibility at 120px mobile search result scale.",
             "Ensure subject gaze points directly toward the secondary hook or title text.",
             "Avoid placing text or important graphics in the lower-right timestamp area.",
         ])
+
+    if fallback_reason:
+        grade = f"[Fallback] {grade}"
+        provider_label = "heuristic-vision-engine (fallback)"
+        note = f"Evaluated using local heuristic fallback ({fallback_reason}). This is not an AI-evaluated score."
+    else:
+        provider_label = "heuristic-vision-engine"
+        note = "Evaluated using visual asset diagnostics. No external multimodal AI vision key configured."
 
     return ThumbnailScoringResponse(
         overall_score=overall_score,
@@ -410,13 +559,13 @@ def score_thumbnail(
         suggestions=suggestions[:5],
         warnings=warnings,
         metadata=metadata,
-        provider="heuristic-vision-engine",
-        provider_note="Evaluated using visual asset diagnostics (16:9 framing, resolution fidelity, contrast variance, and clutter density). No external multimodal AI vision key configured.",
+        provider=provider_label,
+        provider_note=note,
         evaluated_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
-# Curated creator power words that drive curiosity and engagement
+# Curated creator power words
 POWER_WORDS = {
     "why", "secret", "secrets", "proven", "never", "stop", "mistake", "mistakes",
     "truth", "revealed", "finally", "ultimate", "insane", "genius", "worst", "best",
@@ -429,11 +578,18 @@ STOP_WORDS = {
 }
 
 
-def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
+def score_title(
+    request: TitleScoringRequest,
+    gemini_api_key: Optional[str] = None,
+    allow_fallback: Optional[bool] = None,
+) -> TitleScoringResponse:
     """
-    Evaluates a proposed video title across clarity, specificity, curiosity,
-    readability, and topic relevance using heuristic creator analytics.
+    Evaluates a proposed video title.
+    Uses Google Gemini AI when configured; falls back gracefully
+    to local heuristic diagnostics if permitted and explicitly labelled.
     """
+    effective_fallback = request.allow_fallback if allow_fallback is None else allow_fallback
+
     title = request.title.strip()
     if not title:
         raise ValueError("Title cannot be empty. Please provide a video title to score.")
@@ -443,6 +599,109 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
             f"Title length ({len(title)} chars) exceeds maximum allowable limit of 200 characters."
         )
 
+    provider = get_gemini_provider(api_key=gemini_api_key)
+
+    if provider.is_configured():
+        try:
+            analysis = provider.analyze_title(
+                title=title,
+                topic=request.topic,
+                description=request.description,
+                thumbnail_context=request.thumbnail_context,
+            )
+
+            # Deterministic weighted calculation of overall score
+            if analysis.relevance_score is not None and (request.topic or request.description):
+                overall_score = round(
+                    analysis.clarity_score * 0.25
+                    + analysis.specificity_score * 0.20
+                    + analysis.curiosity_score * 0.25
+                    + analysis.readability_score * 0.15
+                    + analysis.relevance_score * 0.15
+                )
+                explanations = [
+                    "Overall score calculated deterministically as: Clarity (25%) + Specificity (20%) + Curiosity (25%) + Readability (15%) + Topic Relevance (15%)."
+                ]
+            else:
+                overall_score = round(
+                    analysis.clarity_score * 0.30
+                    + analysis.specificity_score * 0.25
+                    + analysis.curiosity_score * 0.25
+                    + analysis.readability_score * 0.20
+                )
+                explanations = [
+                    "Overall score calculated deterministically as: Clarity (30%) + Specificity (25%) + Curiosity (25%) + Readability (20%)."
+                ]
+
+            overall_score = max(0, min(100, overall_score))
+            if overall_score >= 90:
+                grade = "A+ Exceptional"
+            elif overall_score >= 80:
+                grade = "A Strong Performer"
+            elif overall_score >= 70:
+                grade = "B Solid Foundation"
+            elif overall_score >= 60:
+                grade = "C Needs Refinement"
+            else:
+                grade = "D Needs Rework"
+
+            criteria: list[TitleCriterionScore] = []
+            for c in analysis.criteria:
+                grade_val = c.grade if c.grade in ("Excellent", "Good", "Needs Improvement", "Poor") else "Good"
+                criteria.append(
+                    TitleCriterionScore(
+                        name=c.name,
+                        score=max(0, min(100, c.score)),
+                        grade=grade_val,  # type: ignore[arg-type]
+                        reasoning=c.reasoning,
+                        suggestions=c.suggestions,
+                    )
+                )
+
+            words = re.findall(r"\b[\w'-]+\b", title)
+            return TitleScoringResponse(
+                overall_score=overall_score,
+                grade=grade,
+                clarity_score=analysis.clarity_score,
+                specificity_score=analysis.specificity_score,
+                curiosity_score=analysis.curiosity_score,
+                readability_score=analysis.readability_score,
+                relevance_score=analysis.relevance_score,
+                criteria=criteria,
+                explanations=explanations + analysis.explanations,
+                suggestions=analysis.suggestions[:5],
+                alternative_titles=analysis.alternative_titles[:5],
+                character_count=len(title),
+                word_count=len(words),
+                provider=f"google-gemini/{provider.model}",
+                provider_note=f"AI title optimization and hook analysis performed by Google Gemini ({provider.model}). Scores calculated deterministically.",
+                evaluated_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+        except GeminiError as err:
+            if not effective_fallback:
+                raise
+            logger.warning("Gemini title analysis failed (%s); using heuristic fallback", err.message)
+            return score_title_heuristic(request, fallback_reason=err.message)
+
+    # Provider not configured
+    if not effective_fallback:
+        raise GeminiConfigError("Google Gemini API is not configured. Set GEMINI_API_KEY in the backend environment.")
+
+    return score_title_heuristic(
+        request,
+        fallback_reason="GEMINI_API_KEY is not configured in backend environment",
+    )
+
+
+def score_title_heuristic(
+    request: TitleScoringRequest,
+    fallback_reason: Optional[str] = None,
+) -> TitleScoringResponse:
+    """
+    Heuristic title evaluation fallback clearly labeled as such.
+    """
+    title = request.title.strip()
     char_count = len(title)
     words = re.findall(r"\b[\w'-]+\b", title)
     word_count = len(words)
@@ -452,8 +711,7 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
     suggestions: list[str] = []
     criteria: list[TitleCriterionScore] = []
 
-    # 1. Clarity Score (0-100)
-    # Assesses grammatical flow and word count
+    # 1. Clarity Score
     clarity_score = 90
     clarity_suggestions: list[str] = []
     if word_count < 4:
@@ -481,8 +739,7 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         )
     )
 
-    # 2. Specificity Score (0-100)
-    # Rewards concrete numbers, brackets, quotes, or distinct entities
+    # 2. Specificity Score
     specificity_score = 70
     specificity_suggestions: list[str] = []
     has_number = bool(re.search(r"\b\d+\b", title))
@@ -493,7 +750,6 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
     if has_brackets:
         specificity_score += 10
 
-    # Content length and descriptive nouns
     meaningful_words = [w for w in words_lower if w not in STOP_WORDS]
     if len(meaningful_words) >= 4:
         specificity_score += 5
@@ -521,8 +777,7 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         )
     )
 
-    # 3. Curiosity / Hook Score (0-100)
-    # Checks for curiosity triggers, emotional friction, and power words
+    # 3. Curiosity / Hook Score
     curiosity_score = 65
     curiosity_suggestions: list[str] = []
     found_power_words = [w for w in words_lower if w in POWER_WORDS]
@@ -560,12 +815,10 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         )
     )
 
-    # 4. Readability Score (0-100)
-    # Length, mobile truncation cutoff (ideal 45-65 chars), casing, punctuation
+    # 4. Readability Score
     readability_score = 90
     readability_suggestions: list[str] = []
 
-    # Mobile truncation check (approx 65 chars cutoff on mobile feed)
     if 45 <= char_count <= 65:
         readability_score = 98
         readability_reason = f"Optimal length ({char_count} chars). Complete title visible on mobile feed without truncation."
@@ -582,7 +835,6 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         readability_reason = f"Excessive length ({char_count} chars). Will suffer heavy mobile truncation."
         readability_suggestions.append("Trim title down to under 65 characters to protect mobile glanceability.")
 
-    # Casing audit
     if title.isupper() and len(title) > 10:
         readability_score -= 20
         readability_suggestions.append("Avoid ALL CAPS. Use Title Case or Sentence Case to prevent appearing spammy.")
@@ -590,7 +842,6 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         readability_score -= 10
         readability_suggestions.append("Capitalize first letters of major words for professional polish.")
 
-    # Punctuation spam
     if re.search(r"(!{2,}|\?{2,})", title):
         readability_score -= 15
         readability_suggestions.append("Remove excessive punctuation ('!!', '??') to maintain platform trust.")
@@ -607,7 +858,7 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         )
     )
 
-    # 5. Topic / Description Relevance (if provided)
+    # 5. Topic / Description Relevance
     relevance_score: Optional[int] = None
     target_context = (request.topic or "") + " " + (request.description or "")
     if target_context.strip():
@@ -635,7 +886,6 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
             )
         )
 
-    # Compute overall score with weighted factors
     if relevance_score is not None:
         overall_score = round(
             clarity_score * 0.25
@@ -670,16 +920,13 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
     else:
         grade = "D Needs Rework"
 
-    # Aggregate top actionable suggestions
     for crit in criteria:
         suggestions.extend(crit.suggestions)
 
     if not suggestions:
         suggestions.append("Your title is well-optimized across length, formatting, and curiosity criteria.")
 
-    # Generate alternative title suggestions based on proven creator formulas
     core_topic = request.topic.strip() if request.topic and request.topic.strip() else title
-    # Clean core topic for template insertion
     clean_topic = re.sub(r"[?!:;]+$", "", core_topic).strip()
     clean_title = re.sub(r"[?!:;]+$", "", title).strip()
 
@@ -689,9 +936,16 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         f"How to Master {clean_topic} [Complete Guide]",
         f"Stop Doing This! The Biggest {clean_topic} Mistake",
     ]
-    # If clean_title is already distinct, provide a curiosity variation
     if clean_title.lower() != clean_topic.lower():
         alternative_titles[0] = f"Why {clean_title} Is Changing Everything"
+
+    if fallback_reason:
+        grade = f"[Fallback] {grade}"
+        provider_label = "heuristic-nlp-engine (fallback)"
+        note = f"Evaluated using local heuristic fallback ({fallback_reason}). This is not an AI-evaluated score."
+    else:
+        provider_label = "heuristic-nlp-engine"
+        note = "Evaluated using heuristic title analytics and creator headline formulas. No external LLM API key configured."
 
     return TitleScoringResponse(
         overall_score=overall_score,
@@ -707,7 +961,7 @@ def score_title(request: TitleScoringRequest) -> TitleScoringResponse:
         alternative_titles=alternative_titles,
         character_count=char_count,
         word_count=word_count,
-        provider="heuristic-nlp-engine",
-        provider_note="Evaluated using heuristic title analytics and creator headline formulas. No external LLM API key configured.",
+        provider=provider_label,
+        provider_note=note,
         evaluated_at=datetime.now(timezone.utc).isoformat(),
     )

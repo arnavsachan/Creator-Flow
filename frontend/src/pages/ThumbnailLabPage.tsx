@@ -55,6 +55,10 @@ export const ThumbnailLabPage: React.FC = () => {
   const [thumbResult, setThumbResult] = useState<ThumbnailScoringResponse | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Sequence and Abort tracking to prevent duplicate requests and stale async response overwrites
+  const thumbRequestIdRef = useRef(0);
+  const thumbAbortControllerRef = useRef<AbortController | null>(null);
+
   // --- Title Scoring State ---
   const [titleInput, setTitleInput] = useState('');
   const [titleTopic, setTitleTopic] = useState('');
@@ -64,9 +68,17 @@ export const ThumbnailLabPage: React.FC = () => {
   const [titleResult, setTitleResult] = useState<TitleScoringResponse | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
+  const titleRequestIdRef = useRef(0);
+  const titleAbortControllerRef = useRef<AbortController | null>(null);
+
   // --- Handlers: Thumbnail ---
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Abort in-flight thumbnail request on new image selection
+    thumbAbortControllerRef.current?.abort();
+    thumbRequestIdRef.current += 1;
+    setIsThumbAnalyzing(false);
     setThumbError(null);
+    setThumbResult(null); // Clear previous results when selecting a new file
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -79,6 +91,9 @@ export const ThumbnailLabPage: React.FC = () => {
       setThumbError(err.message || 'Invalid image file.');
       setSelectedFile(null);
       setPreviewUrl(null);
+    } finally {
+      // Clear input value so selecting the same file again triggers onChange
+      e.target.value = '';
     }
   };
 
@@ -88,23 +103,54 @@ export const ThumbnailLabPage: React.FC = () => {
       return;
     }
 
+    if (isThumbAnalyzing) {
+      return; // Prevent duplicate requests while an evaluation is already active
+    }
+
+    // Abort prior in-flight request if any
+    thumbAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    thumbAbortControllerRef.current = controller;
+    const currentReqId = ++thumbRequestIdRef.current;
+
     setIsThumbAnalyzing(true);
     setThumbError(null);
+    setThumbResult(null); // Clear previous scores so stale results never linger for this attempt
 
     try {
-      const response = await scoreThumbnail(selectedFile, {
-        title: thumbTitle,
-        topic: thumbTopic,
-      });
+      const response = await scoreThumbnail(
+        selectedFile,
+        {
+          title: thumbTitle,
+          topic: thumbTopic,
+        },
+        controller.signal
+      );
+      if (currentReqId !== thumbRequestIdRef.current) {
+        // Discard stale response if a newer request was dispatched
+        return;
+      }
       setThumbResult(response);
     } catch (err: any) {
+      if (controller.signal.aborted || err?.name === 'CanceledError' || err?.name === 'AbortError') {
+        return; // Request was aborted or superseded, ignore
+      }
+      if (currentReqId !== thumbRequestIdRef.current) {
+        return; // Stale request error, ignore
+      }
+      setThumbResult(null); // Ensure stale scores are cleared on failure
       setThumbError(err.message || 'Failed to score thumbnail variant. Please try again.');
     } finally {
-      setIsThumbAnalyzing(false);
+      if (currentReqId === thumbRequestIdRef.current) {
+        setIsThumbAnalyzing(false);
+      }
     }
   };
 
   const handleResetThumbnail = () => {
+    thumbAbortControllerRef.current?.abort();
+    thumbRequestIdRef.current += 1;
+    setIsThumbAnalyzing(false);
     setSelectedFile(null);
     setPreviewUrl(null);
     setThumbResult(null);
@@ -130,20 +176,45 @@ export const ThumbnailLabPage: React.FC = () => {
       return;
     }
 
+    if (isTitleAnalyzing) {
+      return; // Prevent duplicate concurrent title requests
+    }
+
+    titleAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    titleAbortControllerRef.current = controller;
+    const currentReqId = ++titleRequestIdRef.current;
+
     setIsTitleAnalyzing(true);
     setTitleError(null);
+    setTitleResult(null); // Clear previous title scores so stale results never linger
 
     try {
-      const response = await scoreTitle({
-        title: cleanTitle,
-        topic: titleTopic.trim() || undefined,
-        description: titleDescription.trim() || undefined,
-      });
+      const response = await scoreTitle(
+        {
+          title: cleanTitle,
+          topic: titleTopic.trim() || undefined,
+          description: titleDescription.trim() || undefined,
+        },
+        controller.signal
+      );
+      if (currentReqId !== titleRequestIdRef.current) {
+        return;
+      }
       setTitleResult(response);
     } catch (err: any) {
+      if (controller.signal.aborted || err?.name === 'CanceledError' || err?.name === 'AbortError') {
+        return;
+      }
+      if (currentReqId !== titleRequestIdRef.current) {
+        return;
+      }
+      setTitleResult(null); // Ensure stale scores are cleared on failure
       setTitleError(err.message || 'Failed to evaluate video title. Please try again.');
     } finally {
-      setIsTitleAnalyzing(false);
+      if (currentReqId === titleRequestIdRef.current) {
+        setIsTitleAnalyzing(false);
+      }
     }
   };
 
@@ -338,9 +409,21 @@ export const ThumbnailLabPage: React.FC = () => {
 
                 {/* Error Banner */}
                 {thumbError && (
-                  <div className="p-3 rounded-md bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
-                    <span>{thumbError}</span>
+                  <div className="p-3 rounded-md bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs space-y-1.5">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+                      <span className="leading-snug">{thumbError}</span>
+                    </div>
+                    {thumbError.toLowerCase().includes('quota') && (
+                      <p className="text-[11px] text-rose-400/90 pl-6">
+                        <strong>Note:</strong> Google Gemini project quota is exhausted upstream. Code modifications cannot restore provider quota. Check Google AI Studio plan limits.
+                      </p>
+                    )}
+                    {thumbError.toLowerCase().includes('timed out') && (
+                      <p className="text-[11px] text-rose-400/90 pl-6">
+                        Your uploaded image is preserved. Click Retry Diagnostic Scoring to try again.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -355,6 +438,11 @@ export const ThumbnailLabPage: React.FC = () => {
                     <>
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                       <span>Analyzing Visual Contrast...</span>
+                    </>
+                  ) : thumbError ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Retry Diagnostic Scoring</span>
                     </>
                   ) : (
                     <>
@@ -395,34 +483,70 @@ export const ThumbnailLabPage: React.FC = () => {
               {thumbResult && !isThumbAnalyzing && (
                 <div className="space-y-4">
                   {/* Top Score Banner */}
-                  <div className="p-5 rounded-lg bg-[#141418] border border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
+                  <div className="p-5 rounded-lg bg-[#141418] border border-white/[0.06] space-y-3">
+                    {/* Provider Status Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-zinc-800/80">
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono text-zinc-400">OVERALL SCORE</span>
-                        <span
-                          className={`text-xs font-mono px-2 py-0.5 rounded border ${getScoreBadgeColor(
-                            thumbResult.overallScore
-                          )}`}
-                        >
-                          {thumbResult.grade}
+                        {thumbResult.provider.startsWith('google-gemini') ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>AI Vision: {thumbResult.provider.replace('google-gemini/', '')}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Diagnostic Fallback Mode (Heuristics)</span>
+                          </span>
+                        )}
+                      </div>
+                      {thumbResult.metadata && (
+                        <span className="text-[11px] font-mono text-zinc-400">
+                          {thumbResult.metadata.width}×{thumbResult.metadata.height} ({thumbResult.metadata.aspectRatio}) • {thumbResult.metadata.fileFormat}
                         </span>
-                      </div>
-                      <div className="text-3xl font-bold text-zinc-100 font-mono tracking-tight mt-1">
-                        {thumbResult.overallScore}
-                        <span className="text-sm font-normal text-zinc-500"> / 100</span>
-                      </div>
+                      )}
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4 text-xs font-mono pt-3 sm:pt-0 sm:border-l sm:border-zinc-800 sm:pl-6">
-                      <div>
-                        <span className="text-zinc-500 block">Contrast Ratio</span>
-                        <span className="text-zinc-200 font-semibold">{thumbResult.contrastRatio}</span>
+                    {thumbResult.provider.includes('fallback') && (
+                      <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 leading-relaxed space-y-1">
+                        <div className="flex items-center gap-1.5 font-semibold text-amber-200">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>Offline Diagnostic Fallback</span>
+                        </div>
+                        <p className="text-amber-300/90 pl-5">
+                          {thumbResult.providerNote}
+                        </p>
                       </div>
+                    )}
+
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-1">
                       <div>
-                        <span className="text-zinc-500 block">Focal Point</span>
-                        <span className="text-zinc-200 font-semibold truncate block max-w-[160px]">
-                          {thumbResult.focalPoint}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-zinc-400">OVERALL SCORE</span>
+                          <span
+                            className={`text-xs font-mono px-2 py-0.5 rounded border ${getScoreBadgeColor(
+                              thumbResult.overallScore
+                            )}`}
+                          >
+                            {thumbResult.grade}
+                          </span>
+                        </div>
+                        <div className="text-3xl font-bold text-zinc-100 font-mono tracking-tight mt-1">
+                          {thumbResult.overallScore}
+                          <span className="text-sm font-normal text-zinc-500"> / 100</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 text-xs font-mono pt-3 sm:pt-0 sm:border-l sm:border-zinc-800 sm:pl-6">
+                        <div>
+                          <span className="text-zinc-500 block">Contrast Ratio</span>
+                          <span className="text-zinc-200 font-semibold">{thumbResult.contrastRatio}</span>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Focal Point</span>
+                          <span className="text-zinc-200 font-semibold truncate block max-w-[160px]">
+                            {thumbResult.focalPoint}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -581,9 +705,16 @@ export const ThumbnailLabPage: React.FC = () => {
 
                 {/* Error Banner */}
                 {titleError && (
-                  <div className="p-3 rounded-md bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
-                    <span>{titleError}</span>
+                  <div className="p-3 rounded-md bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs space-y-1.5">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+                      <span className="leading-snug">{titleError}</span>
+                    </div>
+                    {titleError.toLowerCase().includes('quota') && (
+                      <p className="text-[11px] text-rose-400/90 pl-6">
+                        <strong>Note:</strong> Google Gemini project quota is exhausted upstream. Code modifications cannot restore provider quota. Check Google AI Studio plan limits.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -634,36 +765,67 @@ export const ThumbnailLabPage: React.FC = () => {
               {titleResult && !isTitleAnalyzing && (
                 <div className="space-y-4">
                   {/* Title Score Overview */}
-                  <div className="p-5 rounded-lg bg-[#141418] border border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
+                  <div className="p-5 rounded-lg bg-[#141418] border border-white/[0.06] space-y-3">
+                    {/* Provider Status Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-zinc-800/80">
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono text-zinc-400">TITLE SCORE</span>
-                        <span
-                          className={`text-xs font-mono px-2 py-0.5 rounded border ${getScoreBadgeColor(
-                            titleResult.overallScore
-                          )}`}
-                        >
-                          {titleResult.grade}
-                        </span>
-                      </div>
-                      <div className="text-3xl font-bold text-zinc-100 font-mono tracking-tight mt-1">
-                        {titleResult.overallScore}
-                        <span className="text-sm font-normal text-zinc-500"> / 100</span>
+                        {titleResult.provider.startsWith('google-gemini') ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>AI Model: {titleResult.provider.replace('google-gemini/', '')}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Diagnostic Fallback Mode (Heuristics)</span>
+                          </span>
+                        )}
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4 text-xs font-mono pt-3 sm:pt-0 sm:border-l sm:border-zinc-800 sm:pl-6">
-                      <div>
-                        <span className="text-zinc-500 block">Length</span>
-                        <span className="text-zinc-200 font-semibold">
-                          {titleResult.characterCount} chars ({titleResult.wordCount} words)
-                        </span>
+                    {titleResult.provider.includes('fallback') && (
+                      <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 leading-relaxed space-y-1">
+                        <div className="flex items-center gap-1.5 font-semibold text-amber-200">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>Offline Diagnostic Fallback</span>
+                        </div>
+                        <p className="text-amber-300/90 pl-5">
+                          {titleResult.providerNote}
+                        </p>
                       </div>
+                    )}
+
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-1">
                       <div>
-                        <span className="text-zinc-500 block">Curiosity Hook</span>
-                        <span className="text-zinc-200 font-semibold">
-                          {titleResult.curiosityScore} / 100
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-zinc-400">TITLE SCORE</span>
+                          <span
+                            className={`text-xs font-mono px-2 py-0.5 rounded border ${getScoreBadgeColor(
+                              titleResult.overallScore
+                            )}`}
+                          >
+                            {titleResult.grade}
+                          </span>
+                        </div>
+                        <div className="text-3xl font-bold text-zinc-100 font-mono tracking-tight mt-1">
+                          {titleResult.overallScore}
+                          <span className="text-sm font-normal text-zinc-500"> / 100</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 text-xs font-mono pt-3 sm:pt-0 sm:border-l sm:border-zinc-800 sm:pl-6">
+                        <div>
+                          <span className="text-zinc-500 block">Length</span>
+                          <span className="text-zinc-200 font-semibold">
+                            {titleResult.characterCount} chars ({titleResult.wordCount} words)
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Curiosity Hook</span>
+                          <span className="text-zinc-200 font-semibold">
+                            {titleResult.curiosityScore} / 100
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>

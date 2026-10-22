@@ -22,6 +22,7 @@ export interface ThumbnailScoringRequest {
   filename?: string;
   title?: string;
   topic?: string;
+  allowFallback?: boolean;
 }
 
 export interface ThumbnailScoringResponse {
@@ -51,6 +52,7 @@ export interface TitleScoringRequest {
   topic?: string;
   description?: string;
   thumbnailContext?: string;
+  allowFallback?: boolean;
 }
 
 export interface TitleScoringResponse {

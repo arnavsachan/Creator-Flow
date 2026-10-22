@@ -108,6 +108,205 @@ describe('ThumbnailLabPage', () => {
       ).toBeInTheDocument();
     });
   });
+
+  it('handles thumbnail scoring timeout cleanly: stops loading, preserves image, clears stale scores, and shows retry message', async () => {
+    window.URL.createObjectURL = vi.fn(() => 'blob:http://localhost/dummy-url');
+
+    const timeoutErr = new Error(
+      'Thumbnail scoring request timed out. The AI model is taking longer than expected. Your image is preserved—please click Analyze to retry.'
+    );
+    (timeoutErr as any).code = 'ECONNABORTED';
+    (timeoutErr as any).isTimeout = true;
+
+    vi.spyOn(thumbnailService, 'scoreThumbnail').mockRejectedValueOnce(timeoutErr);
+
+    render(<ThumbnailLabPage />);
+
+    // Upload a file
+    const file = new File(['dummy-bytes'], 'sample_thumb.png', { type: 'image/png' });
+    const fileInput = document.querySelector('#thumbnail-upload-input') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    // Click Analyze button
+    const analyzeBtn = screen.getByRole('button', { name: /Run Diagnostic Scoring/i });
+    fireEvent.click(analyzeBtn);
+
+    // Wait for error banner and retry button
+    await waitFor(() => {
+      expect(screen.getByText(/Thumbnail scoring request timed out/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Retry Diagnostic Scoring/i })).toBeInTheDocument();
+      // Ensure filename and image preview are preserved
+      expect(screen.getByText('sample_thumb.png')).toBeInTheDocument();
+      // Ensure no stale score is displayed
+      expect(screen.getByText(/No Variant Analyzed Yet/i)).toBeInTheDocument();
+    });
+  });
+
+  it('clears stale scores when a subsequent thumbnail analysis fails with timeout', async () => {
+    window.URL.createObjectURL = vi.fn(() => 'blob:http://localhost/dummy-url-2');
+
+    const mockInitialSuccess = {
+      overallScore: 92,
+      grade: 'A+ Recommended',
+      focalPoint: 'Center Subject Face',
+      contrastRatio: '14.2:1 (AAA)',
+      criteria: [],
+      suggestions: ['Keep text bold'],
+      warnings: [],
+      metadata: {
+        width: 1280,
+        height: 720,
+        aspectRatio: '16:9',
+        fileFormat: 'PNG',
+        fileSizeBytes: 1024,
+        isRecommendedResolution: true,
+      },
+      provider: 'google-gemini/gemini-2.5-flash',
+      providerNote: 'Analyzed with Gemini AI',
+      evaluatedAt: new Date().toISOString(),
+    };
+
+    const mockScoreSpy = vi.spyOn(thumbnailService, 'scoreThumbnail');
+    mockScoreSpy.mockResolvedValueOnce(mockInitialSuccess);
+
+    render(<ThumbnailLabPage />);
+
+    // First upload and analyze
+    const file = new File(['dummy-bytes'], 'variant_a.png', { type: 'image/png' });
+    const fileInput = document.querySelector('#thumbnail-upload-input') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    const analyzeBtn = screen.getByRole('button', { name: /Run Diagnostic Scoring/i });
+    fireEvent.click(analyzeBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/92/)).toBeInTheDocument();
+    });
+
+    // Now mock second attempt as timeout
+    const timeoutErr = new Error('Thumbnail scoring request timed out.');
+    (timeoutErr as any).code = 'ECONNABORTED';
+    mockScoreSpy.mockRejectedValueOnce(timeoutErr);
+
+    const retryBtn = screen.getByRole('button', { name: /Run Diagnostic Scoring/i });
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Thumbnail scoring request timed out/i)).toBeInTheDocument();
+      // The score 92 MUST NOT be in the document anymore (stale score avoided!)
+      expect(screen.queryByText(/92/)).not.toBeInTheDocument();
+      expect(screen.getByText(/No Variant Analyzed Yet/i)).toBeInTheDocument();
+    });
+  });
+
+  it('renders quota exhaustion error with specific note explaining provider limits', async () => {
+    window.URL.createObjectURL = vi.fn(() => 'blob:http://localhost/dummy-url-3');
+
+
+    const quotaErr = new Error(
+      'Google Gemini API quota has been exhausted for this project. Check your plan and billing details at Google AI Studio.'
+    );
+
+    vi.spyOn(thumbnailService, 'scoreThumbnail').mockRejectedValueOnce(quotaErr);
+
+    render(<ThumbnailLabPage />);
+
+    const file = new File(['dummy-bytes'], 'variant_quota.png', { type: 'image/png' });
+    const fileInput = document.querySelector('#thumbnail-upload-input') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    const analyzeBtn = screen.getByRole('button', { name: /Run Diagnostic Scoring/i });
+    fireEvent.click(analyzeBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Google Gemini API quota has been exhausted/i)).toBeInTheDocument();
+      expect(screen.getByText(/Code modifications cannot restore provider quota/i)).toBeInTheDocument();
+      expect(screen.getByText('variant_quota.png')).toBeInTheDocument();
+    });
+  });
+
+  it('discards stale async response if a subsequent request completes first', async () => {
+    window.URL.createObjectURL = vi.fn(() => 'blob:http://localhost/dummy-url-4');
+
+    let resolveFirst: (val: any) => void;
+    const firstPromise = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+
+    const mockScoreSpy = vi.spyOn(thumbnailService, 'scoreThumbnail');
+
+    const file = new File(['dummy-bytes'], 'variant_race.png', { type: 'image/png' });
+    render(<ThumbnailLabPage />);
+    const fileInput = document.querySelector('#thumbnail-upload-input') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    // 1st request hangs
+    mockScoreSpy.mockReturnValueOnce(firstPromise as any);
+    const analyzeBtn = screen.getByRole('button', { name: /Run Diagnostic Scoring/i });
+    fireEvent.click(analyzeBtn);
+
+    // Upload a new file (which cancels request 1)
+    const file2 = new File(['dummy-bytes-2'], 'variant_race_2.png', { type: 'image/png' });
+    fireEvent.change(fileInput, { target: { files: [file2] } });
+
+    // 2nd request succeeds immediately
+    const mockSuccess2 = {
+      overallScore: 85,
+      grade: 'A High Performing',
+      focalPoint: 'Subject Hero',
+      contrastRatio: '10:1 (AA)',
+      criteria: [],
+      suggestions: [],
+      warnings: [],
+      metadata: {
+        width: 1280,
+        height: 720,
+        aspectRatio: '16:9',
+        fileFormat: 'PNG',
+        fileSizeBytes: 2048,
+        isRecommendedResolution: true,
+      },
+      provider: 'google-gemini/gemini-3.8-flash',
+      providerNote: 'Analyzed with Gemini AI',
+      evaluatedAt: new Date().toISOString(),
+    };
+    mockScoreSpy.mockResolvedValueOnce(mockSuccess2);
+
+    const analyzeBtn2 = screen.getByRole('button', { name: /Run Diagnostic Scoring/i });
+    fireEvent.click(analyzeBtn2);
+
+    await waitFor(() => {
+      expect(screen.getByText(/85/)).toBeInTheDocument();
+      expect(screen.getByText('variant_race_2.png')).toBeInTheDocument();
+    });
+
+    // Now resolve the 1st request (stale!)
+    const mockStaleResponse = {
+      overallScore: 50,
+      grade: 'D Low Glanceability',
+      focalPoint: 'Stale Focal',
+      contrastRatio: '3:1',
+      criteria: [],
+      suggestions: [],
+      warnings: [],
+      metadata: {
+        width: 640,
+        height: 360,
+        aspectRatio: '16:9',
+        fileFormat: 'PNG',
+        fileSizeBytes: 1024,
+        isRecommendedResolution: false,
+      },
+      provider: 'google-gemini/gemini-3.8-flash',
+      providerNote: 'Stale analysis',
+      evaluatedAt: new Date().toISOString(),
+    };
+    resolveFirst!(mockStaleResponse);
+
+    // Ensure score 85 remains and stale score 50 is never rendered
+    expect(screen.getByText(/85/)).toBeInTheDocument();
+    expect(screen.queryByText(/50/)).not.toBeInTheDocument();
+  });
 });
 
 describe('thumbnailService file validation', () => {

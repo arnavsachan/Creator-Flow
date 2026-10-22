@@ -1,4 +1,4 @@
-import apiClient from './apiClient';
+import apiClient, { normalizeApiError } from './apiClient';
 import type {
   ThumbnailScoringRequest,
   ThumbnailScoringResponse,
@@ -58,6 +58,9 @@ export function fileToBase64(file: File): Promise<string> {
   });
 }
 
+export const THUMBNAIL_SCORING_TIMEOUT_MS = 30000; // 30s coordinated budget (25s Gemini SDK + 5s network/serialization buffer)
+export const TITLE_SCORING_TIMEOUT_MS = 20000; // 20s coordinated budget (15s Gemini SDK + 5s network/serialization buffer)
+
 /**
  * Submits an uploaded thumbnail to the backend scoring endpoint.
  *
@@ -67,7 +70,7 @@ export function fileToBase64(file: File): Promise<string> {
  */
 export async function scoreThumbnail(
   file: File,
-  options?: { title?: string; topic?: string },
+  options?: { title?: string; topic?: string; allowFallback?: boolean },
   signal?: AbortSignal
 ): Promise<ThumbnailScoringResponse> {
   validateThumbnailFile(file);
@@ -78,14 +81,43 @@ export async function scoreThumbnail(
     filename: file.name,
     title: options?.title?.trim() || undefined,
     topic: options?.topic?.trim() || undefined,
+    allowFallback: options?.allowFallback ?? false,
   };
 
-  const response = await apiClient.post<ThumbnailScoringResponse>(
-    '/thumbnails/score',
-    payload,
-    { signal }
-  );
-  return response.data;
+  try {
+    const response = await apiClient.post<ThumbnailScoringResponse>(
+      '/thumbnails/score',
+      payload,
+      { signal, timeout: THUMBNAIL_SCORING_TIMEOUT_MS }
+    );
+    return response.data;
+  } catch (err: any) {
+    const backendDetail = err?.response?.data?.detail;
+    if (backendDetail && typeof backendDetail === 'string') {
+      const customErr = new Error(backendDetail);
+      if (err.response.status === 504) {
+        (customErr as any).isTimeout = true;
+      }
+      throw customErr;
+    }
+
+    const isTimeout =
+      err?.code === 'ECONNABORTED' ||
+      err?.message?.toLowerCase().includes('timeout') ||
+      err?.response?.status === 504;
+
+    if (isTimeout) {
+      const timeoutError = new Error(
+        'Thumbnail scoring request timed out. The AI model is taking longer than expected. Your image is preserved—please click Analyze to retry.'
+      );
+      (timeoutError as any).code = 'ECONNABORTED';
+      (timeoutError as any).isTimeout = true;
+      throw timeoutError;
+    }
+
+    const normalized = normalizeApiError(err);
+    throw new Error(normalized.message);
+  }
 }
 
 /**
@@ -107,15 +139,44 @@ export async function scoreTitle(
     throw new Error('Title cannot exceed 200 characters.');
   }
 
-  const response = await apiClient.post<TitleScoringResponse>(
-    '/thumbnails/score-title',
-    {
-      ...payload,
-      title: trimmedTitle,
-    },
-    { signal }
-  );
-  return response.data;
+  try {
+    const response = await apiClient.post<TitleScoringResponse>(
+      '/thumbnails/score-title',
+      {
+        ...payload,
+        title: trimmedTitle,
+        allowFallback: payload.allowFallback ?? false,
+      },
+      { signal, timeout: TITLE_SCORING_TIMEOUT_MS }
+    );
+    return response.data;
+  } catch (err: any) {
+    const backendDetail = err?.response?.data?.detail;
+    if (backendDetail && typeof backendDetail === 'string') {
+      const customErr = new Error(backendDetail);
+      if (err.response.status === 504) {
+        (customErr as any).isTimeout = true;
+      }
+      throw customErr;
+    }
+
+    const isTimeout =
+      err?.code === 'ECONNABORTED' ||
+      err?.message?.toLowerCase().includes('timeout') ||
+      err?.response?.status === 504;
+
+    if (isTimeout) {
+      const timeoutError = new Error(
+        'Title scoring request timed out. Please click Evaluate to retry.'
+      );
+      (timeoutError as any).code = 'ECONNABORTED';
+      (timeoutError as any).isTimeout = true;
+      throw timeoutError;
+    }
+
+    const normalized = normalizeApiError(err);
+    throw new Error(normalized.message);
+  }
 }
 
 export default {

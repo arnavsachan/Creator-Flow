@@ -25,8 +25,19 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] | str = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
     ]
     DOCS_URL: str | None = "/docs"
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    # Coordinated timeout budget:
+    # - Multimodal Thumbnail Vision SDK: 25.0s (Backend limit; Frontend client timeout: 30.0s)
+    # - Title Text Optimization SDK: 15.0s (Backend limit; Frontend client timeout: 20.0s)
+    GEMINI_TIMEOUT_SECONDS: float = 25.0
+    GEMINI_TITLE_TIMEOUT_SECONDS: float = 15.0
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
