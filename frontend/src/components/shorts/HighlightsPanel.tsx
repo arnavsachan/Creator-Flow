@@ -16,6 +16,10 @@ interface HighlightsPanelProps {
   onSeek: (seconds: number) => void;
   onApplyTrimmer?: (start: number, end: number) => void;
   onClipsGenerated?: (clips: ShortsClip[]) => void;
+  initialHighlights?: HighlightsData | null;
+  initialSelectedIds?: Set<string>;
+  onHighlightsLoaded?: (data: HighlightsData) => void;
+  onSelectionChange?: (selectedIds: Set<string>) => void;
 }
 
 type PanelState = 'loading' | 'needs_transcript' | 'not_configured' | 'idle' | 'running' | 'done' | 'failed' | 'empty';
@@ -34,11 +38,33 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
   onSeek,
   onApplyTrimmer,
   onClipsGenerated,
+  initialHighlights,
+  initialSelectedIds,
+  onHighlightsLoaded,
+  onSelectionChange,
 }) => {
-  const [highlights, setHighlights] = useState<HighlightsData | null>(null);
-  const [panelState, setPanelState] = useState<PanelState>('loading');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [highlights, setHighlights] = useState<HighlightsData | null>(initialHighlights || null);
+  const [panelState, setPanelState] = useState<PanelState>(() => {
+    if (initialHighlights) {
+      if (initialHighlights.state === 'done') {
+        return initialHighlights.suggestions.length === 0 ? 'empty' : 'done';
+      }
+      if (initialHighlights.state === 'failed') return 'failed';
+      if (initialHighlights.state === 'running') return 'running';
+      return 'idle';
+    }
+    return 'loading';
+  });
+  const [errorMessage, setErrorMessage] = useState<string | null>(
+    initialHighlights?.errorCode
+      ? getFriendlyErrorMessage({ code: initialHighlights.errorCode })
+      : null
+  );
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => {
+    if (initialSelectedIds) return new Set(initialSelectedIds);
+    if (initialHighlights?.suggestions) return new Set(initialHighlights.suggestions.map((s) => s.id));
+    return new Set();
+  });
   const [aspect, setAspect] = useState<AspectRatio>('vertical_9_16');
   const [isGeneratingClips, setIsGeneratingClips] = useState(false);
   const [generateFeedback, setGenerateFeedback] = useState<{ message: string; isError: boolean } | null>(null);
@@ -49,10 +75,28 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
 
   if (prevJobId !== jobId) {
     setPrevJobId(jobId);
-    setPanelState('loading');
-    setHighlights(null);
+    setPanelState(
+      initialHighlights
+        ? initialHighlights.state === 'done'
+          ? initialHighlights.suggestions.length === 0
+            ? 'empty'
+            : 'done'
+          : initialHighlights.state === 'failed'
+          ? 'failed'
+          : initialHighlights.state === 'running'
+          ? 'running'
+          : 'idle'
+        : 'loading'
+    );
+    setHighlights(initialHighlights || null);
     setErrorMessage(null);
-    setSelectedIds(new Set());
+    setSelectedIds(
+      initialSelectedIds
+        ? new Set(initialSelectedIds)
+        : initialHighlights?.suggestions
+        ? new Set(initialHighlights.suggestions.map((s) => s.id))
+        : new Set()
+    );
     setGenerateFeedback(null);
   }
 
@@ -81,15 +125,18 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
           setPanelState('empty');
         } else {
           setPanelState('done');
-          setSelectedIds(new Set(data.suggestions.map((s) => s.id)));
+          const ids = new Set(data.suggestions.map((s) => s.id));
+          setSelectedIds(ids);
+          onSelectionChange?.(ids);
         }
+        onHighlightsLoaded?.(data);
         setErrorMessage(null);
         clearPolling();
       }
     } catch {
       clearPolling();
     }
-  }, [jobId, clearPolling]);
+  }, [jobId, clearPolling, onHighlightsLoaded, onSelectionChange]);
 
   const startPolling = useCallback(() => {
     clearPolling();
@@ -102,6 +149,14 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
     let isMounted = true;
     const controller = new AbortController();
     clearPolling();
+
+    // If highlights are already provided in done state, skip re-fetching
+    if (initialHighlights && initialHighlights.state === 'done') {
+      return () => {
+        isMounted = false;
+        clearPolling();
+      };
+    }
 
     const fetchInitial = async () => {
       try {
@@ -138,7 +193,23 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
             setPanelState('empty');
           } else {
             setPanelState('done');
-            setSelectedIds(new Set(data.suggestions.map((s) => s.id)));
+            const validIds = new Set(data.suggestions.map((s) => s.id));
+            let ids: Set<string>;
+            if (initialSelectedIds && initialSelectedIds.size > 0) {
+              const filtered = new Set(
+                Array.from(initialSelectedIds).filter((id) => validIds.has(id))
+              );
+              ids = filtered.size > 0 ? filtered : validIds;
+            } else {
+              ids = validIds;
+            }
+            setSelectedIds(ids);
+            queueMicrotask(() => {
+              if (isMountedRef.current) {
+                onSelectionChange?.(ids);
+                onHighlightsLoaded?.(data);
+              }
+            });
           }
           setErrorMessage(null);
         } else if (data.state === 'running') {
@@ -170,15 +241,27 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
       controller.abort();
       clearPolling();
     };
-  }, [jobId, hasTranscriptProp, clearPolling, startPolling]);
+  }, [
+    jobId,
+    hasTranscriptProp,
+    clearPolling,
+    startPolling,
+    initialHighlights,
+    initialSelectedIds,
+    onHighlightsLoaded,
+    onSelectionChange,
+  ]);
 
   const handleStartAnalysis = async () => {
     setPanelState('running');
     setErrorMessage(null);
     setGenerateFeedback(null);
+    setSelectedIds(new Set());
+    onSelectionChange?.(new Set());
     try {
       const data = await startHighlights(jobId);
       setHighlights(data);
+      onHighlightsLoaded?.(data);
       startPolling();
     } catch (err: unknown) {
       const errObj = err as { status?: number; code?: string };
@@ -201,15 +284,25 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
       }
       return next;
     });
+    const next = new Set(selectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    onSelectionChange?.(next);
   };
 
   const handleSelectAll = () => {
     if (!highlights?.suggestions) return;
+    let next: Set<string>;
     if (selectedIds.size === highlights.suggestions.length) {
-      setSelectedIds(new Set());
+      next = new Set();
     } else {
-      setSelectedIds(new Set(highlights.suggestions.map((s) => s.id)));
+      next = new Set(highlights.suggestions.map((s) => s.id));
     }
+    setSelectedIds(next);
+    onSelectionChange?.(next);
   };
 
   const handleGenerateClips = async () => {
@@ -219,9 +312,20 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
     setIsGeneratingClips(true);
     setGenerateFeedback(null);
 
+    const selectedSuggestions = (highlights?.suggestions || [])
+      .filter((s) => selectedIds.has(s.id))
+      .map((s) => ({
+        id: s.id,
+        start: s.start,
+        end: s.end,
+        title: s.title,
+        reason: s.reason,
+      }));
+
     try {
       const clips = await generateHighlightClips(jobId, {
         suggestionIds: ids,
+        suggestions: selectedSuggestions,
         aspect,
       });
       setGenerateFeedback({
@@ -248,9 +352,6 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
             <Sparkles className="w-4 h-4 text-zinc-300" />
             <h3 className="text-xs font-semibold text-zinc-100">AI suggested clips</h3>
           </div>
-          <p className="text-[11px] text-zinc-400 mt-0.5">
-            Suggestions come from the transcript. They do not predict performance.
-          </p>
         </div>
       </div>
 
@@ -358,7 +459,7 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
                   key={suggestion.id}
                   className={`p-3 rounded-lg border transition-all ${
                     isSelected
-                      ? 'bg-zinc-900/90 border-zinc-700'
+                      ? 'bg-zinc-900/90 border-zinc-600 shadow-xs'
                       : 'bg-zinc-900/40 border-zinc-800/80 hover:border-zinc-700'
                   }`}
                 >
@@ -368,15 +469,15 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
                       aria-label={`Select clip: ${suggestion.title}`}
                       checked={isSelected}
                       onChange={() => handleToggleSelect(suggestion.id)}
-                      className="mt-1 h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-800 text-white focus:ring-0 cursor-pointer"
+                      className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-800 text-white focus:ring-0 cursor-pointer"
                     />
 
                     <div className="flex-1 min-w-0 space-y-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium text-zinc-100 truncate">
+                        <span className="text-xs font-semibold text-zinc-100 truncate">
                           {suggestion.title}
                         </span>
-                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 shrink-0">
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 shrink-0 border border-zinc-700/60">
                           {formatDuration(duration)}
                         </span>
                       </div>
@@ -385,7 +486,7 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
                         {formatDuration(suggestion.start)} - {formatDuration(suggestion.end)}
                       </div>
 
-                      <p className="text-[11px] text-zinc-400 italic">
+                      <p className="text-[11px] text-zinc-400 truncate leading-relaxed" title={suggestion.reason}>
                         {suggestion.reason}
                       </p>
 
@@ -393,7 +494,7 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
                         <button
                           type="button"
                           onClick={() => onSeek(suggestion.start)}
-                          className="px-2 py-0.5 rounded text-[11px] font-medium bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 transition-colors cursor-pointer"
+                          className="px-2.5 py-1 rounded text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors cursor-pointer"
                         >
                           Preview
                         </button>
@@ -401,7 +502,7 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
                           <button
                             type="button"
                             onClick={() => onApplyTrimmer(suggestion.start, suggestion.end)}
-                            className="px-2 py-0.5 rounded text-[11px] font-medium bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 transition-colors cursor-pointer"
+                            className="px-2.5 py-1 rounded text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700/60 transition-colors cursor-pointer"
                           >
                             Use in trimmer
                           </button>
@@ -414,8 +515,8 @@ export const HighlightsPanel: React.FC<HighlightsPanelProps> = ({
             })}
           </div>
 
-          {/* Footer Controls */}
-          <div className="pt-3 border-t border-zinc-800 space-y-3">
+          {/* Sticky Action Footer */}
+          <div className="sticky bottom-0 bg-[#141418] pt-3 border-t border-zinc-800 space-y-3 z-10 shadow-lg">
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-zinc-400">Aspect:</span>

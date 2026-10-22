@@ -382,11 +382,8 @@ export const ClipsGallery: React.FC<ClipsGalleryProps> = ({
       </div>
 
       {clips.length === 0 ? (
-        <div className="p-8 rounded-lg bg-[#141418] border border-white/[0.06] text-center space-y-1">
-          <p className="text-xs text-zinc-300">No clips generated for this video yet.</p>
-          <p className="text-[11px] text-zinc-500">
-            Choose start and end timestamps above and click &quot;Generate Clip&quot;.
-          </p>
+        <div className="p-8 rounded-lg bg-[#141418] border border-white/[0.06] text-center">
+          <p className="text-xs text-zinc-400">No clips generated yet.</p>
         </div>
       ) : (
         <div

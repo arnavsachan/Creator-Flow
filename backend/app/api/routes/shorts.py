@@ -496,6 +496,7 @@ def generate_highlights_endpoint(
             db=db,
             settings=settings,
             background_tasks=background_tasks,
+            suggestions=req.suggestions,
         )
         return BatchClipResponse(
             data_state="LIVE",

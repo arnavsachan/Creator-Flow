@@ -8,6 +8,8 @@ interface TranscriptPanelProps {
   jobId: string;
   onSelectSegment: (start: number, end: number) => void;
   onSeek: (seconds: number) => void;
+  initialTranscript?: TranscriptData | null;
+  onTranscriptLoaded?: (data: TranscriptData) => void;
 }
 
 const FRIENDLY_ERROR_MAP: Record<string, string> = {
@@ -22,17 +24,21 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
   jobId,
   onSelectSegment,
   onSeek,
+  initialTranscript,
+  onTranscriptLoaded,
 }) => {
-  const [transcript, setTranscript] = useState<TranscriptData | null>(null);
-  const [panelState, setPanelState] = useState<TranscriptState | 'loading'>('loading');
+  const [transcript, setTranscript] = useState<TranscriptData | null>(initialTranscript || null);
+  const [panelState, setPanelState] = useState<TranscriptState | 'loading'>(
+    initialTranscript ? initialTranscript.state : 'loading'
+  );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [prevJobId, setPrevJobId] = useState<string>(jobId);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   if (prevJobId !== jobId) {
     setPrevJobId(jobId);
-    setPanelState('loading');
-    setTranscript(null);
+    setPanelState(initialTranscript ? initialTranscript.state : 'loading');
+    setTranscript(initialTranscript || null);
     setErrorMessage(null);
   }
 
@@ -48,6 +54,7 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
       try {
         const data = await getTranscript(jobId, signal);
         setTranscript(data);
+        onTranscriptLoaded?.(data);
         if (data.state === 'failed') {
           const friendly =
             (data.errorCode && FRIENDLY_ERROR_MAP[data.errorCode]) ||
@@ -81,7 +88,7 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
         return null;
       }
     },
-    [jobId, clearPolling]
+    [jobId, clearPolling, onTranscriptLoaded]
   );
 
   const startPolling = useCallback(() => {
@@ -100,6 +107,7 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
     try {
       const data = await startTranscription(jobId);
       setTranscript(data);
+      onTranscriptLoaded?.(data);
       startPolling();
     } catch (err: unknown) {
       const errObj = err as { status?: number; code?: string; message?: string };
@@ -121,10 +129,23 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
     const controller = new AbortController();
     clearPolling();
 
+    // If transcript is already loaded and done, skip initial fetch
+    if (initialTranscript && initialTranscript.state === 'done') {
+      return () => {
+        isMounted = false;
+        clearPolling();
+      };
+    }
+
     getTranscript(jobId, controller.signal)
       .then((data) => {
         if (!isMounted) return;
         setTranscript(data);
+        queueMicrotask(() => {
+          if (isMounted) {
+            onTranscriptLoaded?.(data);
+          }
+        });
         if (data.state === 'failed') {
           const friendly =
             (data.errorCode && FRIENDLY_ERROR_MAP[data.errorCode]) ||
@@ -165,7 +186,7 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
       controller.abort();
       clearPolling();
     };
-  }, [jobId, startPolling, clearPolling]);
+  }, [jobId, startPolling, clearPolling, initialTranscript, onTranscriptLoaded]);
 
   return (
     <div className="p-4 rounded-lg bg-[#141418] border border-white/[0.06] space-y-3">
@@ -289,13 +310,6 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
                 No speech detected in this video.
               </p>
             )}
-          </div>
-
-          {/* Model and Device Metadata */}
-          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500 pt-2 border-t border-zinc-800/60">
-            <span>Language: {transcript.languageDetected || 'auto'}</span>
-            <span>Model: {transcript.modelSize || 'medium'}</span>
-            <span>Device: {(transcript.deviceUsed || 'cpu').toUpperCase()}</span>
           </div>
         </div>
       )}

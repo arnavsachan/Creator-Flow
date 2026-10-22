@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,7 @@ from app.db.session import get_session_factory
 from app.models.shorts import ShortsClip, ShortsJob
 from app.schemas.shorts import (
     CreateClipRequest,
+    HighlightSuggestionPayload,
     ShortsClipData,
     ShortsJobData,
 )
@@ -318,6 +320,7 @@ def create_highlight_clips(
     db: Session,
     settings: Settings,
     background_tasks: BackgroundTasks,
+    suggestions: Optional[list[HighlightSuggestionPayload]] = None,
 ) -> list[ShortsClip]:
     job = db.get(ShortsJob, job_id)
     if not job:
@@ -326,28 +329,63 @@ def create_highlight_clips(
     if aspect not in ASPECT_RATIOS:
         raise MediaValidationError("INVALID_ASPECT")
 
-    if not suggestion_ids:
-        return []
-
-    # Cap at HIGHLIGHT_MAX_SUGGESTIONS per request
-    ids_to_process = suggestion_ids[: settings.HIGHLIGHT_MAX_SUGGESTIONS]
-
     storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
     highlights_file = get_highlights_path(storage_dir, job_id)
-    if not highlights_file.exists():
-        raise MediaValidationError("SUGGESTION_NOT_FOUND")
 
-    try:
-        with open(highlights_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        saved_suggestions = {s["id"]: s for s in data.get("suggestions", []) if "id" in s}
-    except Exception:
-        raise MediaValidationError("SUGGESTION_NOT_FOUND")
+    # 1. Load any saved suggestions from disk if present
+    saved_suggestions: dict[str, dict] = {}
+    if highlights_file.exists():
+        try:
+            with open(highlights_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved_suggestions = {s["id"]: s for s in data.get("suggestions", []) if "id" in s}
+        except Exception:
+            saved_suggestions = {}
 
-    # Validate that all requested suggestion IDs exist
+    # 2. If client supplied validated suggestions in request, merge/supplement saved_suggestions
+    if suggestions:
+        for idx, sug in enumerate(suggestions):
+            s_id = sug.id or f"sug_{idx}_{uuid.uuid4().hex[:6]}"
+            item_dict = {
+                "id": s_id,
+                "start": float(sug.start),
+                "end": float(sug.end),
+                "title": sug.title or "Highlight",
+                "reason": sug.reason or "",
+                "status": sug.status or "suggested",
+            }
+            saved_suggestions[s_id] = item_dict
+            if sug.id:
+                saved_suggestions[sug.id] = item_dict
+
+    # 3. Determine which IDs to process
+    if suggestion_ids:
+        ids_to_process = suggestion_ids[: settings.HIGHLIGHT_MAX_SUGGESTIONS]
+    elif suggestions:
+        ids_to_process = [s.id for s in suggestions if s.id][: settings.HIGHLIGHT_MAX_SUGGESTIONS]
+        if not ids_to_process:
+            ids_to_process = list(saved_suggestions.keys())[: settings.HIGHLIGHT_MAX_SUGGESTIONS]
+    else:
+        return []
+
+    # 4. Validate that all requested suggestion IDs exist in saved_suggestions
     for sid in ids_to_process:
         if sid not in saved_suggestions:
             raise MediaValidationError("SUGGESTION_NOT_FOUND")
+
+    # 5. Persist the updated/recovered suggestions to highlights_file so future queries or status checks find them
+    try:
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        persisted_data = {
+            "job_id": job_id,
+            "suggestions": list(saved_suggestions.values()),
+            "model_used": settings.AI_MODEL,
+            "transcript_truncated": False,
+        }
+        with open(highlights_file, "w", encoding="utf-8") as f:
+            json.dump(persisted_data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
     storage_dir.mkdir(parents=True, exist_ok=True)
     created_clips: list[ShortsClip] = []

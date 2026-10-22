@@ -115,9 +115,9 @@ describe('TranscriptPanel Component Tests', () => {
 
     expect(screen.getByText('Aaj hum baat karenge Creator Flow ke baare mein')).toBeInTheDocument();
     expect(screen.getByText(/video exceeds 10 minutes/i)).toBeInTheDocument();
-    expect(screen.getByText(/language: hi/i)).toBeInTheDocument();
-    expect(screen.getByText(/model: medium/i)).toBeInTheDocument();
-    expect(screen.getByText(/device: CUDA/i)).toBeInTheDocument();
+    expect(screen.queryByText(/language:/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/model:/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/device:/i)).not.toBeInTheDocument();
   });
 
   it('renders "No speech detected in this video." when done with zero segments', async () => {

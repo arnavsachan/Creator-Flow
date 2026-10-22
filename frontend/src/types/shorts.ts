@@ -89,8 +89,17 @@ export interface HighlightsData {
 
 export type HighlightsResponse = EnvelopeResponse<HighlightsData>;
 
+export interface HighlightSuggestionPayload {
+  id?: string;
+  start: number;
+  end: number;
+  title?: string;
+  reason?: string;
+}
+
 export interface GenerateHighlightsRequest {
   suggestionIds: string[];
+  suggestions?: HighlightSuggestionPayload[];
   aspect: AspectRatio;
 }
 

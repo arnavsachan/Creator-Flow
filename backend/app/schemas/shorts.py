@@ -130,10 +130,22 @@ class HighlightsResponse(BaseModel):
     data: Optional[HighlightsData] = None
 
 
+class HighlightSuggestionPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: Optional[str] = None
+    start: float = Field(..., ge=0)
+    end: float = Field(..., gt=0)
+    title: Optional[str] = None
+    reason: Optional[str] = None
+    status: Optional[str] = "suggested"
+
+
 class GenerateHighlightsRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    suggestion_ids: list[str] = Field(..., alias="suggestionIds")
+    suggestion_ids: list[str] = Field(default_factory=list, alias="suggestionIds")
+    suggestions: Optional[list[HighlightSuggestionPayload]] = Field(default=None)
     aspect: str = Field(default="vertical_9_16")
 
 

@@ -23,6 +23,16 @@ vi.mock('../services/shortsService', () => ({
     deviceUsed: null,
   }),
   startTranscription: vi.fn(),
+  getHighlights: vi.fn().mockResolvedValue({
+    jobId: 'mock-job-id',
+    state: 'none',
+    errorCode: null,
+    suggestions: [],
+    modelUsed: null,
+    transcriptTruncated: false,
+  }),
+  startHighlights: vi.fn(),
+  generateHighlightClips: vi.fn(),
   getSourcePreviewUrl: vi.fn((id: string) => `/mock-api/shorts/jobs/${id}/source`),
   getClipDownloadUrl: vi.fn((jobId: string, clipId: string) => `/mock-api/shorts/jobs/${jobId}/clips/${clipId}/download`),
   getFriendlyErrorMessage: vi.fn((err: any) => err?.message || 'An unexpected error occurred.'),
@@ -32,6 +42,9 @@ const mockListJobs = vi.mocked(shortsService.listJobs);
 const mockUploadJob = vi.mocked(shortsService.uploadJob);
 const mockCreateClip = vi.mocked(shortsService.createClip);
 const mockDeleteClip = vi.mocked(shortsService.deleteClip);
+const mockGetTranscript = vi.mocked(shortsService.getTranscript);
+const mockGetHighlights = vi.mocked(shortsService.getHighlights);
+const mockGenerateHighlightClips = vi.mocked(shortsService.generateHighlightClips);
 
 describe('ShortsClipperPage Frontend Tests', () => {
   beforeEach(() => {
@@ -689,6 +702,370 @@ describe('ShortsClipperPage Frontend Tests', () => {
       expect(
         screen.getByText('Wait until this clip finishes processing before deleting.')
       ).toBeInTheDocument();
+    });
+  });
+
+  it('mode switcher defaults to Manual mode with trimmer and settings visible, transcript and AI panels hidden', async () => {
+    const job: ShortsJob = {
+      id: 'job-mode-1',
+      ownerId: null,
+      originalFilename: 'sample.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [],
+    };
+    mockListJobs.mockResolvedValueOnce([job]);
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Start time' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Generate Clip/i })).toBeInTheDocument();
+    });
+
+    // Transcript panel and AI suggested clips panels are not rendered
+    expect(screen.queryByText(/AI suggested clips/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Transcript')).not.toBeInTheDocument();
+    // Subtitle is manual mode subtitle
+    expect(
+      screen.getByText(/Precision manual trimming with FFmpeg re-encoding/i)
+    ).toBeInTheDocument();
+  });
+
+  it('clicking AI Auto-Clip switches mode: Transcript and AI panels rendered, trimmer and manual settings hidden', async () => {
+    const job: ShortsJob = {
+      id: 'job-mode-2',
+      ownerId: null,
+      originalFilename: 'sample.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [],
+    };
+    mockListJobs.mockResolvedValueOnce([job]);
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Start time' })).toBeInTheDocument();
+    });
+
+    const aiTabButton = screen.getByRole('tab', { name: /AI Auto-Clip/i });
+    fireEvent.click(aiTabButton);
+
+    // AI panels are now rendered
+    await waitFor(() => {
+      expect(screen.getByText('Transcript')).toBeInTheDocument();
+      expect(screen.getByText(/AI suggested clips/i)).toBeInTheDocument();
+    });
+
+    // Trimmer and ClipSettingsCard are hidden
+    expect(screen.queryByRole('slider', { name: 'Start time' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Generate Clip/i })).not.toBeInTheDocument();
+
+    // Header subtitle updated
+    expect(
+      screen.getByText(/Automated local speech transcription and AI-powered clip suggestions/i)
+    ).toBeInTheDocument();
+  });
+
+  it('switching between Manual and AI Auto-Clip preserves loaded transcript and AI suggestions without re-fetching or losing selection state', async () => {
+    const job: ShortsJob = {
+      id: 'job-preserve-state',
+      ownerId: null,
+      originalFilename: 'sample.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 60,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [],
+    };
+    mockListJobs.mockResolvedValueOnce([job]);
+
+    mockGetTranscript.mockResolvedValue({
+      jobId: 'job-preserve-state',
+      state: 'done',
+      errorCode: null,
+      segments: [{ start: 0, end: 15, text: 'Hello world' }],
+      languageDetected: 'en',
+      durationCoveredSeconds: 15,
+      truncated: false,
+      modelSize: 'medium',
+      deviceUsed: 'cpu',
+    });
+
+    mockGetHighlights.mockResolvedValue({
+      jobId: 'job-preserve-state',
+      state: 'done',
+      errorCode: null,
+      suggestions: [
+        {
+          id: 'sug-preserve-1',
+          start: 0,
+          end: 15,
+          title: 'Preserved Highlight 1',
+          reason: 'Good hook',
+          status: 'suggested',
+        },
+        {
+          id: 'sug-preserve-2',
+          start: 20,
+          end: 35,
+          title: 'Preserved Highlight 2',
+          reason: 'Solid explanation',
+          status: 'suggested',
+        },
+      ],
+      modelUsed: 'gemini-2.5-flash',
+      transcriptTruncated: false,
+    });
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Start time' })).toBeInTheDocument();
+    });
+
+    // 1. Switch to AI Auto-Clip
+    const aiTabButton = screen.getByRole('tab', { name: /AI Auto-Clip/i });
+    fireEvent.click(aiTabButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('Preserved Highlight 1')).toBeInTheDocument();
+      expect(screen.getByText('Preserved Highlight 2')).toBeInTheDocument();
+    });
+
+    // Both selected by default: count is 2
+    expect(screen.getByRole('button', { name: /Generate selected clips \(2\)/i })).toBeInTheDocument();
+
+    // Uncheck first card
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[0]);
+    expect(screen.getByRole('button', { name: /Generate selected clips \(1\)/i })).toBeInTheDocument();
+
+    const transcriptCallCountBefore = mockGetTranscript.mock.calls.length;
+    const highlightsCallCountBefore = mockGetHighlights.mock.calls.length;
+
+    // 2. Switch back to Manual mode
+    const manualTabButton = screen.getByRole('tab', { name: /Manual/i });
+    fireEvent.click(manualTabButton);
+
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Start time' })).toBeInTheDocument();
+      expect(screen.queryByText(/AI suggested clips/i)).not.toBeInTheDocument();
+    });
+
+    // 3. Switch back to AI Auto-Clip mode
+    fireEvent.click(screen.getByRole('tab', { name: /AI Auto-Clip/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Preserved Highlight 1')).toBeInTheDocument();
+      expect(screen.getByText('Preserved Highlight 2')).toBeInTheDocument();
+    });
+
+    // Verify selection state was preserved: still (1) selected!
+    expect(screen.getByRole('button', { name: /Generate selected clips \(1\)/i })).toBeInTheDocument();
+
+    // Verify no new fetch calls were made
+    expect(mockGetTranscript.mock.calls.length).toBe(transcriptCallCountBefore);
+    expect(mockGetHighlights.mock.calls.length).toBe(highlightsCallCountBefore);
+  });
+
+  it('clicking "Use in trimmer" on an AI suggestion switches the view back to "Manual" mode and updates the trimmer start/end range', async () => {
+    const job: ShortsJob = {
+      id: 'job-trimmer-handoff',
+      ownerId: null,
+      originalFilename: 'sample.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 120,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [],
+    };
+    mockListJobs.mockResolvedValueOnce([job]);
+
+    mockGetTranscript.mockResolvedValue({
+      jobId: 'job-trimmer-handoff',
+      state: 'done',
+      errorCode: null,
+      segments: [{ start: 0, end: 60, text: 'Sample text' }],
+      languageDetected: 'en',
+      durationCoveredSeconds: 60,
+      truncated: false,
+      modelSize: 'medium',
+      deviceUsed: 'cpu',
+    });
+
+    mockGetHighlights.mockResolvedValue({
+      jobId: 'job-trimmer-handoff',
+      state: 'done',
+      errorCode: null,
+      suggestions: [
+        {
+          id: 'sug-handoff-1',
+          start: 12.5,
+          end: 38.0,
+          title: 'Epic Highlight Moment',
+          reason: 'High engagement moment',
+          status: 'suggested',
+        },
+      ],
+      modelUsed: 'gemini-2.5-flash',
+      transcriptTruncated: false,
+    });
+
+    const { container } = render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Start time' })).toBeInTheDocument();
+    });
+
+    // Switch to AI Auto-Clip mode
+    fireEvent.click(screen.getByRole('tab', { name: /AI Auto-Clip/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Epic Highlight Moment')).toBeInTheDocument();
+    });
+
+    // Click "Use in trimmer" button
+    const useInTrimmerBtn = screen.getByRole('button', { name: /Use in trimmer/i });
+    fireEvent.click(useInTrimmerBtn);
+
+    // Must switch back to Manual mode automatically
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Start time' })).toBeInTheDocument();
+      expect(screen.queryByText(/AI suggested clips/i)).not.toBeInTheDocument();
+    });
+
+    // Start and end seconds must match the suggestion
+    const startInput = container.querySelector('#trim-start-seconds') as HTMLInputElement;
+    const endInput = container.querySelector('#trim-end-seconds') as HTMLInputElement;
+
+    expect(startInput.value).toBe('12.5');
+    expect(endInput.value).toBe('38');
+  });
+
+  it('generates clips from selected AI suggestions, passes full payload, queues clips immediately in gallery, and avoids clutter', async () => {
+    const job: ShortsJob = {
+      id: 'job-ai-batch-1',
+      ownerId: null,
+      originalFilename: 'demo-lecture.mp4',
+      sizeBytes: 1048576,
+      durationSeconds: 120,
+      width: 1920,
+      height: 1080,
+      status: 'uploaded',
+      errorCode: null,
+      createdAt: '2026-10-19T10:00:00Z',
+      clips: [],
+    };
+    mockListJobs.mockResolvedValue([job]);
+
+    mockGetTranscript.mockResolvedValue({
+      jobId: 'job-ai-batch-1',
+      state: 'done',
+      errorCode: null,
+      segments: [{ start: 0, end: 60, text: 'Clean transcript segment' }],
+      languageDetected: 'hi',
+      durationCoveredSeconds: 60,
+      truncated: false,
+      modelSize: 'medium',
+      deviceUsed: 'cpu',
+    });
+
+    mockGetHighlights.mockResolvedValue({
+      jobId: 'job-ai-batch-1',
+      state: 'done',
+      errorCode: null,
+      suggestions: [
+        {
+          id: 'sug-batch-1',
+          start: 5.0,
+          end: 25.0,
+          title: 'First Key Concept',
+          reason: 'Clear explanation of concept',
+          status: 'suggested',
+        },
+      ],
+      modelUsed: 'gemini-2.5-flash',
+      transcriptTruncated: false,
+    });
+
+    render(<ShortsClipperPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('demo-lecture.mp4')[0]).toBeInTheDocument();
+    });
+
+    // Verify clean empty state in Generated Clips gallery
+    expect(screen.getByText('No clips generated yet.')).toBeInTheDocument();
+    expect(screen.queryByText(/Choose start and end timestamps above/i)).not.toBeInTheDocument();
+
+    // Switch to AI Auto-Clip mode
+    fireEvent.click(screen.getByRole('tab', { name: /AI Auto-Clip/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('First Key Concept')).toBeInTheDocument();
+    });
+
+    // Clutter checks: No disclaimer subtitle, no model/device metadata
+    expect(screen.queryByText(/they do not predict performance/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/device: cpu/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/model: medium/i)).not.toBeInTheDocument();
+
+    // Mock generated batch response
+    mockGenerateHighlightClips.mockResolvedValueOnce([
+      {
+        id: 'clip-ai-generated-1',
+        jobId: 'job-ai-batch-1',
+        startSeconds: 5.0,
+        endSeconds: 25.0,
+        aspect: 'vertical_9_16',
+        status: 'queued',
+        errorCode: null,
+        createdAt: '2026-10-21T10:00:00Z',
+        finishedAt: null,
+      },
+    ]);
+
+    const generateBtn = screen.getByRole('button', { name: /Generate selected clips \(1\)/i });
+    fireEvent.click(generateBtn);
+
+    await waitFor(() => {
+      expect(mockGenerateHighlightClips).toHaveBeenCalledWith('job-ai-batch-1', {
+        suggestionIds: ['sug-batch-1'],
+        suggestions: [
+          {
+            id: 'sug-batch-1',
+            start: 5.0,
+            end: 25.0,
+            title: 'First Key Concept',
+            reason: 'Clear explanation of concept',
+          },
+        ],
+        aspect: 'vertical_9_16',
+      });
+    });
+
+    // Check that the clip is queued and appears in Generated Clips gallery
+    await waitFor(() => {
+      expect(screen.getByTestId('clip-status-clip-ai-generated-1')).toBeInTheDocument();
+      expect(screen.getByText('QUEUED')).toBeInTheDocument();
     });
   });
 });

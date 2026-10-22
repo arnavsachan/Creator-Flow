@@ -551,24 +551,71 @@ def test_generate_clips_sequentially_from_highlight_suggestions(setup_test_db):
         rendered_clips_order.append((start, end, aspect))
         output_path.touch()
 
-        with patch("app.services.shorts.generate_clip", side_effect=mock_generate_clip):
-            resp = client.post(
-                f"/api/v1/shorts/jobs/{job_id}/highlights/generate",
-                json={"suggestionIds": [sug_id1, sug_id2], "aspect": "vertical_9_16"},
-            )
-        assert resp.status_code == 202, resp.json()
-        created = resp.json()["data"]
-        assert len(created) == 2
-        assert created[0]["startSeconds"] == 0.0
-        assert created[0]["endSeconds"] == 20.0
-        assert created[0]["aspect"] == "vertical_9_16"
-        assert created[1]["startSeconds"] == 30.0
-        assert created[1]["endSeconds"] == 55.0
+    with patch("app.services.shorts.generate_clip", side_effect=mock_generate_clip):
+        resp = client.post(
+            f"/api/v1/shorts/jobs/{job_id}/highlights/generate",
+            json={"suggestionIds": [sug_id1, sug_id2], "aspect": "vertical_9_16"},
+        )
+    assert resp.status_code == 202, resp.json()
+    created = resp.json()["data"]
+    assert len(created) == 2
+    assert created[0]["startSeconds"] == 0.0
+    assert created[0]["endSeconds"] == 20.0
+    assert created[0]["aspect"] == "vertical_9_16"
+    assert created[1]["startSeconds"] == 30.0
+    assert created[1]["endSeconds"] == 55.0
 
-        # Verify sequential execution in single background task
-        assert len(rendered_clips_order) == 2
-        assert rendered_clips_order[0] == (0.0, 20.0, "vertical_9_16")
-        assert rendered_clips_order[1] == (30.0, 55.0, "vertical_9_16")
+    # Verify sequential execution in single background task
+    assert len(rendered_clips_order) == 2
+    assert rendered_clips_order[0] == (0.0, 20.0, "vertical_9_16")
+    assert rendered_clips_order[1] == (30.0, 55.0, "vertical_9_16")
+
+
+def test_generate_clips_with_direct_suggestions_payload_when_file_missing(setup_test_db):
+    settings = setup_test_db
+    client = TestClient(app)
+    job_id = str(uuid.uuid4())
+    _create_dummy_job_in_db(job_id, duration=100.0)
+    storage_dir = Path(settings.SHORTS_STORAGE_DIR).resolve()
+
+    # Ensure highlights file does NOT exist (e.g. server restarted or storage wiped)
+    h_file = highlights_module.get_highlights_path(storage_dir, job_id)
+    if h_file.exists():
+        h_file.unlink()
+
+    sug_id = str(uuid.uuid4())
+    rendered_clips = []
+
+    def mock_generate_clip(input_path, output_path, start, end, aspect, ffmpeg_bin):
+        rendered_clips.append((start, end, aspect))
+        output_path.touch()
+
+    with patch("app.services.shorts.generate_clip", side_effect=mock_generate_clip):
+        resp = client.post(
+            f"/api/v1/shorts/jobs/{job_id}/highlights/generate",
+            json={
+                "suggestionIds": [sug_id],
+                "suggestions": [
+                    {
+                        "id": sug_id,
+                        "start": 10.0,
+                        "end": 35.0,
+                        "title": "Recovered Suggestion",
+                        "reason": "Direct validated range",
+                    }
+                ],
+                "aspect": "square_1_1",
+            },
+        )
+    assert resp.status_code == 202, resp.json()
+    created = resp.json()["data"]
+    assert len(created) == 1
+    assert created[0]["startSeconds"] == 10.0
+    assert created[0]["endSeconds"] == 35.0
+    assert created[0]["aspect"] == "square_1_1"
+
+    # Highlights file should now be recreated with the suggestions
+    assert h_file.exists()
 
 
 def test_delete_job_removes_highlight_files(setup_test_db):

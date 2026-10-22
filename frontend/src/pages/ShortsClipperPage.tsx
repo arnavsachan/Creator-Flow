@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 import { ErrorState } from '../components/states/ErrorState';
 import { LoadingSkeleton } from '../components/states/LoadingSkeleton';
@@ -19,7 +19,7 @@ import {
   listJobs,
   uploadJob,
 } from '../services/shortsService';
-import type { AspectRatio, ShortsClip, ShortsJob } from '../types/shorts';
+import type { AspectRatio, HighlightsData, ShortsClip, ShortsJob, TranscriptData } from '../types/shorts';
 import { formatFileSize } from '../utils/shortsFormat';
 
 const MAX_CLIP_SECONDS = 180;
@@ -45,6 +45,12 @@ export const ShortsClipperPage: React.FC = () => {
   const [aspect, setAspect] = useState<AspectRatio>('vertical_9_16');
   const [isCreatingClip, setIsCreatingClip] = useState<boolean>(false);
   const [trimError, setTrimError] = useState<string | null>(null);
+
+  // Mode switcher & preserved studio state
+  const [clipperMode, setClipperMode] = useState<'manual' | 'ai'>('manual');
+  const [transcriptsByJob, setTranscriptsByJob] = useState<Record<string, TranscriptData>>({});
+  const [highlightsByJob, setHighlightsByJob] = useState<Record<string, HighlightsData>>({});
+  const [selectedHighlightIdsByJob, setSelectedHighlightIdsByJob] = useState<Record<string, Set<string>>>({});
 
   const activeJob = jobs.find((j) => j.id === activeJobId) || null;
 
@@ -300,11 +306,23 @@ export const ShortsClipperPage: React.FC = () => {
 
   const handleClipsGenerated = (newClips: ShortsClip[]) => {
     if (!activeJobId || newClips.length === 0) return;
+    const normalizedClips: ShortsClip[] = newClips.map((c) => ({
+      id: c.id,
+      jobId: c.jobId ?? (c as unknown as { job_id?: string }).job_id ?? activeJobId,
+      startSeconds: Number(c.startSeconds ?? (c as unknown as { start_seconds?: number }).start_seconds ?? 0),
+      endSeconds: Number(c.endSeconds ?? (c as unknown as { end_seconds?: number }).end_seconds ?? 0),
+      aspect: c.aspect || 'vertical_9_16',
+      status: c.status || 'queued',
+      errorCode: c.errorCode ?? (c as unknown as { error_code?: string }).error_code ?? null,
+      createdAt: c.createdAt ?? (c as unknown as { created_at?: string }).created_at ?? new Date().toISOString(),
+      finishedAt: c.finishedAt ?? (c as unknown as { finished_at?: string }).finished_at ?? null,
+    }));
+
     setJobs((prev) =>
       prev.map((j) => {
         if (j.id === activeJobId) {
-          const existingIds = new Set(j.clips.map((c) => c.id));
-          const uniqueNew = newClips.filter((c) => !existingIds.has(c.id));
+          const existingIds = new Set(j.clips.map((clip) => clip.id));
+          const uniqueNew = normalizedClips.filter((clip) => !existingIds.has(clip.id));
           return {
             ...j,
             clips: [...uniqueNew, ...j.clips],
@@ -315,11 +333,41 @@ export const ShortsClipperPage: React.FC = () => {
     );
   };
 
+  const handleApplyTrimmerFromHighlight = (start: number, end: number) => {
+    setStartSeconds(start);
+    setEndSeconds(end);
+    setTrimError(null);
+    setClipperMode('manual');
+    handleSeekVideo(start);
+  };
+
+  const handlePreviewRange = (seconds: number) => {
+    handleSeekVideo(seconds);
+    if (videoRef.current) {
+      videoRef.current.play?.().catch(() => {});
+    }
+  };
+
+  const handleTranscriptLoaded = useCallback((data: TranscriptData) => {
+    if (!activeJobId) return;
+    setTranscriptsByJob((prev) => (prev[activeJobId] === data ? prev : { ...prev, [activeJobId]: data }));
+  }, [activeJobId]);
+
+  const handleHighlightsLoaded = useCallback((data: HighlightsData) => {
+    if (!activeJobId) return;
+    setHighlightsByJob((prev) => (prev[activeJobId] === data ? prev : { ...prev, [activeJobId]: data }));
+  }, [activeJobId]);
+
+  const handleSelectionChange = useCallback((ids: Set<string>) => {
+    if (!activeJobId) return;
+    setSelectedHighlightIdsByJob((prev) => (prev[activeJobId] === ids ? prev : { ...prev, [activeJobId]: ids }));
+  }, [activeJobId]);
+
   // 503 Feature Disabled State
   if (isFeatureDisabled) {
     return (
       <div className="max-w-[1400px] mx-auto space-y-6">
-        <ShortsHeader />
+        <ShortsHeader mode={clipperMode} onModeChange={setClipperMode} />
 
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-8 text-center max-w-lg mx-auto space-y-3">
           <div className="w-10 h-10 rounded-md bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mx-auto">
@@ -363,7 +411,7 @@ export const ShortsClipperPage: React.FC = () => {
   if (pageError && jobs.length === 0) {
     return (
       <div className="max-w-[1400px] mx-auto space-y-6">
-        <ShortsHeader />
+        <ShortsHeader mode={clipperMode} onModeChange={setClipperMode} />
         <ErrorState
           title="Failed to Load Video Clipper"
           message={pageError}
@@ -376,7 +424,7 @@ export const ShortsClipperPage: React.FC = () => {
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
       {/* Header */}
-      <ShortsHeader />
+      <ShortsHeader mode={clipperMode} onModeChange={setClipperMode} />
 
       {/* Upload Zone (Large dropzone when no active job; slim bar when active job exists) */}
       <ShortsUploadDropzone
@@ -386,69 +434,94 @@ export const ShortsClipperPage: React.FC = () => {
         onFileSelect={handleFileUpload}
       />
 
-      {/* Desktop (lg+) two-column workspace:
-          Left column = source player + timeline trimmer
-          Right column = clip settings + jobs list */}
+      {/* Workspace Layout: Separated by active mode */}
       {activeJob ? (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-          {/* Left Column (lg:col-span-2): Source Player + Timeline Trimmer */}
-          <div className="lg:col-span-2 space-y-6">
-            <SourceVideoPlayer
-              job={activeJob}
-              videoRef={videoRef}
-              onTimeUpdate={(t) => setCurrentTime(t)}
-            />
+        clipperMode === 'manual' ? (
+          /* Manual Mode: 2-column workspace (Player + Trimmer left; Settings + Jobs right) */
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+            {/* Left Column (lg:col-span-2): Source Player + Timeline Trimmer */}
+            <div className="lg:col-span-2 space-y-6">
+              <SourceVideoPlayer
+                job={activeJob}
+                videoRef={videoRef}
+                onTimeUpdate={(t) => setCurrentTime(t)}
+              />
 
-            <TimelineTrimmer
-              durationSeconds={activeJob.durationSeconds}
-              startSeconds={startSeconds}
-              endSeconds={endSeconds}
-              currentTime={currentTime}
-              onChangeStart={(s) => setStartSeconds(s)}
-              onChangeEnd={(e) => setEndSeconds(e)}
-              onSetStartToCurrent={setStartFromCurrentVideoTime}
-              onSetEndToCurrent={setEndFromCurrentVideoTime}
-              onSeek={handleSeekVideo}
-              validationError={validationError || trimError}
-            />
+              <TimelineTrimmer
+                durationSeconds={activeJob.durationSeconds}
+                startSeconds={startSeconds}
+                endSeconds={endSeconds}
+                currentTime={currentTime}
+                onChangeStart={(s) => setStartSeconds(s)}
+                onChangeEnd={(e) => setEndSeconds(e)}
+                onSetStartToCurrent={setStartFromCurrentVideoTime}
+                onSetEndToCurrent={setEndFromCurrentVideoTime}
+                onSeek={handleSeekVideo}
+                validationError={validationError || trimError}
+              />
+            </div>
 
-            <TranscriptPanel
-              jobId={activeJob.id}
-              onSelectSegment={handleSelectTranscriptSegment}
-              onSeek={handleSeekVideo}
-            />
+            {/* Right Column (lg:col-span-1): Clip Settings + Jobs List */}
+            <div className="space-y-6">
+              <ClipSettingsCard
+                aspect={aspect}
+                onAspectChange={(asp) => setAspect(asp)}
+                isCreatingClip={isCreatingClip}
+                onGenerateClip={handleCreateClip}
+                selectedLength={Math.max(0, endSeconds - startSeconds)}
+                validationError={validationError || trimError}
+              />
 
-            <HighlightsPanel
-              jobId={activeJob.id}
-              onSeek={handleSeekVideo}
-              onApplyTrimmer={(start, end) => {
-                setStartSeconds(start);
-                setEndSeconds(end);
-                handleSeekVideo(start);
-              }}
-              onClipsGenerated={handleClipsGenerated}
-            />
+              <JobsList
+                jobs={jobs}
+                activeJobId={activeJobId}
+                onSelectJob={(j) => selectActiveJob(j)}
+                onDeleteJob={handleDeleteJob}
+              />
+            </div>
           </div>
+        ) : (
+          /* AI Auto-Clip Studio Mode: 2-column layout (Player + Transcript left; Highlights + Jobs right) */
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+            {/* Left Column (lg:col-span-2): Video Player on top, Transcript Panel directly below */}
+            <div className="lg:col-span-2 space-y-6">
+              <SourceVideoPlayer
+                job={activeJob}
+                videoRef={videoRef}
+                onTimeUpdate={(t) => setCurrentTime(t)}
+              />
 
-          {/* Right Column (lg:col-span-1): Clip Settings + Jobs List */}
-          <div className="space-y-6">
-            <ClipSettingsCard
-              aspect={aspect}
-              onAspectChange={(asp) => setAspect(asp)}
-              isCreatingClip={isCreatingClip}
-              onGenerateClip={handleCreateClip}
-              selectedLength={Math.max(0, endSeconds - startSeconds)}
-              validationError={validationError || trimError}
-            />
+              <TranscriptPanel
+                jobId={activeJob.id}
+                initialTranscript={transcriptsByJob[activeJob.id] || null}
+                onTranscriptLoaded={handleTranscriptLoaded}
+                onSelectSegment={handleSelectTranscriptSegment}
+                onSeek={handlePreviewRange}
+              />
+            </div>
 
-            <JobsList
-              jobs={jobs}
-              activeJobId={activeJobId}
-              onSelectJob={(j) => selectActiveJob(j)}
-              onDeleteJob={handleDeleteJob}
-            />
+            {/* Right Column (lg:col-span-1): AI Suggested Clips on top, Jobs List below */}
+            <div className="space-y-6">
+              <HighlightsPanel
+                jobId={activeJob.id}
+                initialHighlights={highlightsByJob[activeJob.id] || null}
+                initialSelectedIds={selectedHighlightIdsByJob[activeJob.id]}
+                onHighlightsLoaded={handleHighlightsLoaded}
+                onSelectionChange={handleSelectionChange}
+                onSeek={handlePreviewRange}
+                onApplyTrimmer={handleApplyTrimmerFromHighlight}
+                onClipsGenerated={handleClipsGenerated}
+              />
+
+              <JobsList
+                jobs={jobs}
+                activeJobId={activeJobId}
+                onSelectJob={(j) => selectActiveJob(j)}
+                onDeleteJob={handleDeleteJob}
+              />
+            </div>
           </div>
-        </div>
+        )
       ) : (
         /* Empty State when no jobs uploaded */
         <div className="p-12 rounded-lg bg-[#141418] border border-white/[0.06] text-center space-y-2">

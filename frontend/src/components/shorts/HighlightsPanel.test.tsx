@@ -327,6 +327,8 @@ describe('HighlightsPanel Component Tests', () => {
       expect(screen.getByText('Core Architecture Breakdown')).toBeInTheDocument();
     });
 
+    expect(screen.queryByText(/they do not predict performance/i)).not.toBeInTheDocument();
+
     // Both selected by default
     expect(screen.getByRole('button', { name: /generate selected clips \(2\)/i })).toBeInTheDocument();
 
@@ -370,6 +372,15 @@ describe('HighlightsPanel Component Tests', () => {
     await waitFor(() => {
       expect(mockGenerateHighlightClips).toHaveBeenCalledWith(jobId, {
         suggestionIds: ['sug-2'],
+        suggestions: [
+          {
+            id: 'sug-2',
+            start: 35.0,
+            end: 60.0,
+            title: 'Core Architecture Breakdown',
+            reason: 'Clear explanation of core technical flow.',
+          },
+        ],
         aspect: 'square_1_1',
       });
       expect(onClipsGenerated).toHaveBeenCalled();
