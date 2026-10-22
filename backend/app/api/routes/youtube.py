@@ -16,12 +16,15 @@ from app.schemas.youtube import (
     AnalyticsOverviewReportResponse,
     AnalyticsTelemetryResponse,
     AudienceTelemetryResponse,
+    ChannelDetailsResponse,
     ChannelHistoryResponse,
     ChannelSnapshotItem,
     ChannelVideoItem,
     ChannelVideosResponse,
     ConnectedChannelResponse,
     ConnectionStatusResponse,
+    ContentLibraryResponse,
+    ContentVideoItem,
     DisconnectResponse,
     GeographicAudienceReportResponse,
     GeographicViewerItem,
@@ -40,12 +43,22 @@ from app.services.youtube_analytics import (
     fetch_geography_report,
     fetch_traffic_sources_report,
 )
+from app.services.youtube_data import (
+    YOUTUBE_DATA_API_DISABLED,
+    YOUTUBE_DATA_SCOPE_REQUIRED,
+    YOUTUBE_TOKEN_EXPIRED,
+    build_demo_channel_details,
+    build_demo_content_library,
+    fetch_channel_content_library,
+    fetch_channel_details,
+)
 from app.services.youtube_oauth import (
     disconnect_channel,
     get_channel_snapshots,
     get_channel_videos,
     get_user_connected_channel,
     has_analytics_permission,
+    has_youtube_data_permission,
     process_oauth_callback,
     start_youtube_oauth,
     sync_channel_metrics,
@@ -923,6 +936,9 @@ def get_channel_videos_endpoint(
                 published_at=v.published_at.isoformat(),
                 relative_published=format_relative_time(v.published_at),
                 thumbnail_url=v.thumbnail_url,
+                duration=v.duration,
+                duration_seconds=v.duration_seconds,
+                description=v.description,
                 view_count=v.view_count,
                 like_count=v.like_count,
                 comment_count=v.comment_count,
@@ -952,6 +968,9 @@ def get_channel_videos_endpoint(
                 published_at="2026-10-15T00:00:00Z",
                 relative_published=dv.published,
                 thumbnail_url=dv.thumbnail_url,
+                duration="14:28",
+                duration_seconds=868,
+                description=None,
                 view_count=dv.views,
                 like_count=None,
                 comment_count=None,
@@ -964,6 +983,215 @@ def get_channel_videos_endpoint(
             data_state="DEMO",
             videos=items,
             message="Displaying synthetic demo recent videos.",
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Channel '{target_id}' not found.",
+    )
+
+
+@router.get(
+    "/channel/details",
+    response_model=ChannelDetailsResponse,
+    summary="Connected Channel Details",
+    description="Returns detailed metadata, thumbnails, branding settings, topics, and subscriber status from YouTube Data API v3.",
+)
+def get_channel_details_endpoint(
+    channel_id: Optional[str] = Query(default=None),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+) -> ChannelDetailsResponse:
+    target_id = (channel_id or "demo-channel-1").strip()
+
+    if current_user and not target_id.startswith("demo-"):
+        owned = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.channel_id == target_id, ConnectedChannel.user_id == current_user.id)
+            .first()
+        )
+        if not owned:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Channel '{target_id}' not found for authenticated user.",
+            )
+
+    channel = (
+        db.query(ConnectedChannel)
+        .filter(ConnectedChannel.channel_id == target_id)
+        .first()
+    )
+    if channel and channel.status == "connected":
+        if not has_youtube_data_permission(channel):
+            auth_user = current_user or channel.user
+            auth_url = None
+            if auth_user:
+                auth_url, _ = start_youtube_oauth(db, auth_user)
+            return ChannelDetailsResponse(
+                channel_id=channel.channel_id,
+                data_state="AUTHORIZATION_REQUIRED",
+                is_live=True,
+                title=channel.title,
+                custom_url=channel.custom_url,
+                thumbnail_url=channel.thumbnail_url,
+                subscriber_count=channel.subscriber_count,
+                video_count=channel.video_count,
+                view_count=channel.view_count,
+                has_data_scope=False,
+                authorization_url=auth_url,
+                message="YouTube Data API permissions (https://www.googleapis.com/auth/youtube.readonly) required. Re-authentication is necessary.",
+            )
+
+        try:
+            return fetch_channel_details(db, channel)
+        except HTTPException as exc:
+            if exc.detail == YOUTUBE_DATA_API_DISABLED:
+                return ChannelDetailsResponse(
+                    channel_id=channel.channel_id,
+                    data_state="SERVICE_DISABLED",
+                    is_live=True,
+                    title=channel.title,
+                    custom_url=channel.custom_url,
+                    thumbnail_url=channel.thumbnail_url,
+                    subscriber_count=channel.subscriber_count,
+                    video_count=channel.video_count,
+                    view_count=channel.view_count,
+                    has_data_scope=True,
+                    message=(
+                        "YouTube Data API v3 is not enabled in your Google Cloud Project. "
+                        "Please visit https://console.developers.google.com/apis/api/youtube.googleapis.com/overview "
+                        "to enable it, then retry."
+                    ),
+                )
+            if exc.detail in (YOUTUBE_DATA_SCOPE_REQUIRED, YOUTUBE_TOKEN_EXPIRED):
+                auth_user = current_user or channel.user
+                auth_url = None
+                if auth_user:
+                    auth_url, _ = start_youtube_oauth(db, auth_user)
+                return ChannelDetailsResponse(
+                    channel_id=channel.channel_id,
+                    data_state="AUTHORIZATION_REQUIRED",
+                    is_live=True,
+                    title=channel.title,
+                    custom_url=channel.custom_url,
+                    thumbnail_url=channel.thumbnail_url,
+                    subscriber_count=channel.subscriber_count,
+                    video_count=channel.video_count,
+                    view_count=channel.view_count,
+                    has_data_scope=False,
+                    authorization_url=auth_url,
+                    message="YouTube credentials expired or missing scope. Please re-authenticate.",
+                )
+            raise exc
+
+    if target_id in ("demo-channel-1", "demo-channel-2") or target_id.startswith("demo-"):
+        return build_demo_channel_details(target_id)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Channel '{target_id}' not found.",
+    )
+
+
+@router.get(
+    "/content-library",
+    response_model=ContentLibraryResponse,
+    summary="Channel Content Library",
+    description="Returns uploaded video list with duration, publish dates, metadata, and public statistics using the uploads playlist approach, supporting pagination and search.",
+)
+def get_content_library_endpoint(
+    channel_id: Optional[str] = Query(default=None),
+    page_token: Optional[str] = Query(default=None),
+    max_results: int = Query(default=20, ge=1, le=50),
+    q: Optional[str] = Query(default=None),
+    order: Optional[str] = Query(default="date"),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+) -> ContentLibraryResponse:
+    if order not in ("date", "views", "likes", "title"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid order '{order}'. Supported orders are: ['date', 'views', 'likes', 'title'].",
+        )
+
+    target_id = (channel_id or "demo-channel-1").strip()
+
+    if current_user and not target_id.startswith("demo-"):
+        owned = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.channel_id == target_id, ConnectedChannel.user_id == current_user.id)
+            .first()
+        )
+        if not owned:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Channel '{target_id}' not found for authenticated user.",
+            )
+
+    channel = (
+        db.query(ConnectedChannel)
+        .filter(ConnectedChannel.channel_id == target_id)
+        .first()
+    )
+    if channel and channel.status == "connected":
+        if not has_youtube_data_permission(channel):
+            auth_user = current_user or channel.user
+            auth_url = None
+            if auth_user:
+                auth_url, _ = start_youtube_oauth(db, auth_user)
+            return ContentLibraryResponse(
+                channel_id=channel.channel_id,
+                data_state="AUTHORIZATION_REQUIRED",
+                is_live=True,
+                videos=[],
+                authorization_url=auth_url,
+                message="YouTube Data API permissions (https://www.googleapis.com/auth/youtube.readonly) required. Re-authentication is necessary.",
+            )
+
+        try:
+            return fetch_channel_content_library(
+                db=db,
+                channel=channel,
+                page_token=page_token,
+                max_results=max_results,
+                q=q,
+                order=order,
+            )
+        except HTTPException as exc:
+            if exc.detail == YOUTUBE_DATA_API_DISABLED:
+                return ContentLibraryResponse(
+                    channel_id=channel.channel_id,
+                    data_state="SERVICE_DISABLED",
+                    is_live=True,
+                    videos=[],
+                    message=(
+                        "YouTube Data API v3 is not enabled in your Google Cloud Project. "
+                        "Please visit https://console.developers.google.com/apis/api/youtube.googleapis.com/overview "
+                        "to enable it, then retry."
+                    ),
+                )
+            if exc.detail in (YOUTUBE_DATA_SCOPE_REQUIRED, YOUTUBE_TOKEN_EXPIRED):
+                auth_user = current_user or channel.user
+                auth_url = None
+                if auth_user:
+                    auth_url, _ = start_youtube_oauth(db, auth_user)
+                return ContentLibraryResponse(
+                    channel_id=channel.channel_id,
+                    data_state="AUTHORIZATION_REQUIRED",
+                    is_live=True,
+                    videos=[],
+                    authorization_url=auth_url,
+                    message="YouTube credentials expired or missing scope. Please re-authenticate.",
+                )
+            raise exc
+
+    if target_id in ("demo-channel-1", "demo-channel-2") or target_id.startswith("demo-"):
+        return build_demo_content_library(
+            channel_id=target_id,
+            page_token=page_token,
+            max_results=max_results,
+            q=q,
+            order=order,
         )
 
     raise HTTPException(

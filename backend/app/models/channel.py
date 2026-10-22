@@ -54,6 +54,12 @@ class ConnectedChannel(Base):
         if not self.scope:
             return False
         return "yt-analytics.readonly" in self.scope or "yt-analytics.monetary.readonly" in self.scope
+
+    @property
+    def has_youtube_data_scope(self) -> bool:
+        if not self.scope:
+            return False
+        return "youtube.readonly" in self.scope or "https://www.googleapis.com/auth/youtube" in self.scope
     connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

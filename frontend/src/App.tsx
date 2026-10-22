@@ -6,6 +6,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { AudiencePage } from './pages/AudiencePage';
 import { ChannelsPage } from './pages/ChannelsPage';
+import { ContentLibraryPage } from './pages/ContentLibraryPage';
 import { VideoIdeasPage } from './pages/VideoIdeasPage';
 import { ScriptStudioPage } from './pages/ScriptStudioPage';
 import { ThumbnailLabPage } from './pages/ThumbnailLabPage';
@@ -42,6 +43,7 @@ export const App: React.FC = () => {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/audience-insights" element={<AudiencePage />} />
+            <Route path="/content-library" element={<ContentLibraryPage />} />
             <Route path="/channels" element={<ChannelsPage />} />
             <Route path="/video-ideas" element={<VideoIdeasPage />} />
             <Route path="/script-generator" element={<ScriptStudioPage />} />

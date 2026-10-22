@@ -56,6 +56,21 @@ def has_analytics_permission(channel: Optional[ConnectedChannel]) -> bool:
     )
 
 
+def has_youtube_data_permission(channel: Optional[ConnectedChannel]) -> bool:
+    """
+    Checks whether the given connected channel has been granted YouTube Data API permissions
+    by inspecting the actual scope string recorded from Google OAuth.
+    """
+    if not channel or not channel.scope:
+        return False
+    scopes = set(channel.scope.split())
+    return (
+        YOUTUBE_READONLY_SCOPE in scopes
+        or "youtube.readonly" in channel.scope
+        or "https://www.googleapis.com/auth/youtube" in scopes
+    )
+
+
 def start_youtube_oauth(
     db: Session,
     user: User,
@@ -699,11 +714,13 @@ def sync_channel_videos_from_youtube(
                 YOUTUBE_VIDEOS_URL,
                 headers=headers,
                 params={
-                    "part": "snippet,statistics",
+                    "part": "snippet,contentDetails,statistics",
                     "id": ",".join(video_ids),
                 },
             )
             if resp.status_code == 200:
+                from app.services.youtube_data import parse_iso8601_duration
+
                 data = resp.json()
                 for v_item in data.get("items", []):
                     vid_id = v_item.get("id")
@@ -712,8 +729,10 @@ def sync_channel_videos_from_youtube(
 
                     v_snippet = v_item.get("snippet", {})
                     v_stats = v_item.get("statistics", {})
+                    v_cd = v_item.get("contentDetails", {})
 
                     title = v_snippet.get("title") or video_snippets[vid_id]["title"]
+                    description = v_snippet.get("description")
                     pub_raw = v_snippet.get("publishedAt") or video_snippets[vid_id]["published_at"]
                     try:
                         pub_dt = (
@@ -731,6 +750,9 @@ def sync_channel_videos_from_youtube(
                         or thumbs.get("default", {}).get("url")
                         or video_snippets[vid_id]["thumbnail_url"]
                     )
+
+                    duration_iso = v_cd.get("duration") if v_cd else None
+                    dur_secs, dur_formatted = parse_iso8601_duration(duration_iso) if duration_iso else (None, None)
 
                     try:
                         views = int(v_stats.get("viewCount", 0) or 0)
@@ -763,6 +785,10 @@ def sync_channel_videos_from_youtube(
                         existing.title = title
                         existing.published_at = pub_dt
                         existing.thumbnail_url = thumb_url
+                        existing.duration = dur_formatted
+                        existing.duration_seconds = dur_secs
+                        if description is not None:
+                            existing.description = description
                         existing.view_count = views
                         existing.like_count = likes
                         existing.comment_count = comments
@@ -775,6 +801,9 @@ def sync_channel_videos_from_youtube(
                             title=title,
                             published_at=pub_dt,
                             thumbnail_url=thumb_url,
+                            duration=dur_formatted,
+                            duration_seconds=dur_secs,
+                            description=description,
                             view_count=views,
                             like_count=likes,
                             comment_count=comments,
