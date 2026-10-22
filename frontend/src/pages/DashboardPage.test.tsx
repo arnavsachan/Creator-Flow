@@ -678,4 +678,210 @@ describe('DashboardPage Reliability Tests', () => {
     expect(mockSyncChannel).not.toHaveBeenCalled();
     expect(syncButton).not.toBeDisabled();
   });
+
+  // m. date range selection updates requested lookback days and refetches overview
+  it('m. date range selection updates requested lookback days and refetches overview', async () => {
+    const liveData = createMockSuccessResponse('uc-live-001');
+    mockGetDashboardOverview.mockResolvedValue(liveData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001" initialDateRange="28d">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Initial mount fetches with 28 days
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 28, expect.any(AbortSignal));
+    });
+
+    // Click 90d option
+    const btn90 = screen.getByTestId('date-range-option-90d');
+    await act(async () => {
+      btn90.click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 90, expect.any(AbortSignal));
+    });
+
+    // Click 7d option
+    const btn7 = screen.getByTestId('date-range-option-7d');
+    await act(async () => {
+      btn7.click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 7, expect.any(AbortSignal));
+    });
+
+    // Click 365d option
+    const btn365 = screen.getByTestId('date-range-option-365d');
+    await act(async () => {
+      btn365.click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 365, expect.any(AbortSignal));
+    });
+  });
+
+  // n. chart renders multiple same-day snapshot timestamps cleanly
+  it('n. chart renders multiple same-day snapshot timestamps cleanly', async () => {
+    const baseData = createMockSuccessResponse('uc-live-001').data!;
+    const sameDayMultiSnapshot = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22, 20:57', views: 585281, watchTime: 0, subscribers: 1200 },
+          { date: 'Oct 22, 22:49', views: 585281, watchTime: 0, subscribers: 1200 },
+        ],
+      },
+    });
+    mockGetDashboardOverview.mockResolvedValue(sameDayMultiSnapshot);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001" initialDateRange="90d">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // With 2 points, insufficient history card should NOT be shown
+    await waitFor(() => {
+      expect(screen.queryByTestId('insufficient-history-state')).not.toBeInTheDocument();
+    });
+
+    // Trajectory subtitle should reflect the selected range
+    expect(screen.getByText('Aggregate 90d performance trajectory')).toBeInTheDocument();
+  });
+
+  // o. live mode 7d -> 28d -> 90d -> 365d transitions verify selected state, API params, and response handling
+  it('o. live mode 7d -> 28d -> 90d -> 365d transitions verify selected state, API params, and response handling', async () => {
+    const baseData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg').data!;
+    const liveOverviewData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg', {
+      data: {
+        ...baseData,
+        channelId: 'UCEf4pkTHK7lokchUozkSQPg',
+        velocityChart: [
+          { date: 'Oct 22, 20:57', views: 585281, watchTime: 0, subscribers: 3510 },
+          { date: 'Oct 22, 22:49', views: 585281, watchTime: 0, subscribers: 3510 },
+        ],
+      },
+    });
+    mockGetDashboardOverview.mockResolvedValue(liveOverviewData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="UCEf4pkTHK7lokchUozkSQPg" initialDateRange="7d">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Initial state: 7d selected
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 7, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-7d').className).toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 7d performance trajectory')).toBeInTheDocument();
+
+    // Transition 1: Click 28d
+    await act(async () => {
+      screen.getByTestId('date-range-option-28d').click();
+    });
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 28, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-28d').className).toContain('text-zinc-100');
+    expect(screen.getByTestId('date-range-option-7d').className).not.toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 28d performance trajectory')).toBeInTheDocument();
+
+    // Transition 2: Click 90d
+    await act(async () => {
+      screen.getByTestId('date-range-option-90d').click();
+    });
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 90, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-90d').className).toContain('text-zinc-100');
+    expect(screen.getByTestId('date-range-option-28d').className).not.toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 90d performance trajectory')).toBeInTheDocument();
+
+    // Transition 3: Click 365d
+    await act(async () => {
+      screen.getByTestId('date-range-option-365d').click();
+    });
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 365, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-365d').className).toContain('text-zinc-100');
+    expect(screen.getByTestId('date-range-option-90d').className).not.toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 365d performance trajectory')).toBeInTheDocument();
+  });
+
+  // p. selected date range persists across page reload via localStorage
+  it('p. selected date range persists across page reload via localStorage', async () => {
+    localStorage.clear();
+    const baseData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg').data!;
+    const liveOverviewData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg', {
+      data: {
+        ...baseData,
+        channelId: 'UCEf4pkTHK7lokchUozkSQPg',
+        velocityChart: [
+          { date: 'Oct 22, 20:57', views: 585281, watchTime: 0, subscribers: 3510 },
+          { date: 'Oct 22, 22:49', views: 585281, watchTime: 0, subscribers: 3510 },
+        ],
+      },
+    });
+    mockGetDashboardOverview.mockResolvedValue(liveOverviewData);
+
+    // Initial session: mount and select 90d
+    const { unmount } = render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="UCEf4pkTHK7lokchUozkSQPg">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalled();
+    });
+
+    // Select 90d
+    await act(async () => {
+      screen.getByTestId('date-range-option-90d').click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 90, expect.any(AbortSignal));
+    });
+    expect(localStorage.getItem('app_date_range')).toBe('90d');
+
+    // Simulate page reload: unmount previous component tree
+    unmount();
+    mockGetDashboardOverview.mockClear();
+
+    // Re-render as a new page load (reading from localStorage)
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="UCEf4pkTHK7lokchUozkSQPg">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Verify persisted 90d range was restored on mount
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('UCEf4pkTHK7lokchUozkSQPg', 90, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-90d').className).toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 90d performance trajectory')).toBeInTheDocument();
+  });
 });
+

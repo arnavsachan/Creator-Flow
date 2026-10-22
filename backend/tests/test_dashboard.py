@@ -415,3 +415,107 @@ def test_dashboard_overview_live_snapshot_trajectory_and_failed_snapshot_filteri
     assert data2["velocityChart"][1]["views"] == 6000
     assert data2["kpis"]["totalViews"]["change"] == 20.0
     assert data2["kpis"]["totalViews"]["trend"] == "up"
+    # When multiple snapshots occur on the same day, time is included to prevent misleading identical axis labels
+    assert data2["velocityChart"][0]["date"] != data2["velocityChart"][1]["date"]
+    assert ":" in data2["velocityChart"][0]["date"]
+
+
+def test_dashboard_overview_date_range_filtering_and_demo_scaling(client: TestClient, db_session):
+    """
+    Verifies that:
+    1. Demo channel scales velocity chart points and KPI change periods for 7d, 28d, 90d, 365d.
+    2. Live channel strictly filters snapshots according to the requested days parameter.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.models.channel import ConnectedChannel
+    from app.models.snapshot import ChannelSnapshot
+    from app.models.user import User
+
+    # 1. Demo channel with various ranges
+    res_7d = client.get("/api/v1/dashboard/overview?channel_id=demo-channel-1&days=7")
+    assert res_7d.status_code == 200
+    data_7d = res_7d.json()["data"]
+    assert data_7d["kpis"]["totalViews"]["changePeriod"] == "vs previous 7d"
+    assert len(data_7d["velocityChart"]) == 10
+
+    res_90d = client.get("/api/v1/dashboard/overview?channel_id=demo-channel-1&days=90")
+    assert res_90d.status_code == 200
+    data_90d = res_90d.json()["data"]
+    assert data_90d["kpis"]["totalViews"]["changePeriod"] == "vs previous 90d"
+    # Oldest point in 90d should have a date different from 7d
+    assert data_90d["velocityChart"][0]["date"] != data_7d["velocityChart"][0]["date"]
+
+    # 2. Live channel with historical snapshots across different ranges
+    user = User(id="user_range_test", email="range@example.com", is_active=True)
+    db_session.add(user)
+    db_session.commit()
+
+    live_ch = ConnectedChannel(
+        id="chan_range_test",
+        user_id="user_range_test",
+        platform="youtube",
+        channel_id="UC_RANGE_TEST",
+        title="Range Testing Channel",
+        subscriber_count=200,
+        video_count=20,
+        view_count=8000,
+        status="connected",
+    )
+    db_session.add(live_ch)
+
+    now = datetime.now(timezone.utc)
+    # Old snapshot: 50 days ago
+    s_old = ChannelSnapshot(
+        channel_id="UC_RANGE_TEST",
+        snapshot_at=now - timedelta(days=50),
+        subscriber_count=150,
+        video_count=15,
+        view_count=6000,
+        sync_status="success",
+    )
+    # Mid snapshot: 15 days ago
+    s_mid = ChannelSnapshot(
+        channel_id="UC_RANGE_TEST",
+        snapshot_at=now - timedelta(days=15),
+        subscriber_count=180,
+        video_count=18,
+        view_count=7000,
+        sync_status="success",
+    )
+    # Recent snapshot: 2 days ago
+    s_recent = ChannelSnapshot(
+        channel_id="UC_RANGE_TEST",
+        snapshot_at=now - timedelta(days=2),
+        subscriber_count=200,
+        video_count=20,
+        view_count=8000,
+        sync_status="success",
+    )
+    db_session.add_all([s_old, s_mid, s_recent])
+    db_session.commit()
+
+    # 7d lookback -> only s_recent (1 point -> baseline changePeriod)
+    r7 = client.get("/api/v1/dashboard/overview?channel_id=UC_RANGE_TEST&days=7")
+    assert r7.status_code == 200
+    d7 = r7.json()["data"]
+    assert len(d7["velocityChart"]) == 1
+    assert d7["velocityChart"][0]["views"] == 8000
+
+    # 28d lookback -> s_mid and s_recent (2 points)
+    r28 = client.get("/api/v1/dashboard/overview?channel_id=UC_RANGE_TEST&days=28")
+    assert r28.status_code == 200
+    d28 = r28.json()["data"]
+    assert len(d28["velocityChart"]) == 2
+    assert d28["velocityChart"][0]["views"] == 7000
+    assert d28["velocityChart"][1]["views"] == 8000
+    assert d28["kpis"]["totalViews"]["changePeriod"] == "vs previous 28d"
+
+    # 90d lookback -> s_old, s_mid, s_recent (3 points)
+    r90 = client.get("/api/v1/dashboard/overview?channel_id=UC_RANGE_TEST&days=90")
+    assert r90.status_code == 200
+    d90 = r90.json()["data"]
+    assert len(d90["velocityChart"]) == 3
+    assert d90["velocityChart"][0]["views"] == 6000
+    assert d90["velocityChart"][1]["views"] == 7000
+    assert d90["velocityChart"][2]["views"] == 8000
+    assert d90["kpis"]["totalViews"]["changePeriod"] == "vs previous 90d"

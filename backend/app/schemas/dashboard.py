@@ -41,6 +41,7 @@ class VelocityChartPoint(CamelModel):
     views: int
     watch_time: int
     subscribers: int
+    timestamp: Optional[str] = None
 
 
 class ActionableInsight(CamelModel):

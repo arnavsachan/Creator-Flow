@@ -131,7 +131,7 @@ const DEFAULT_PIPELINE_ITEMS = [
 ];
 
 export const DashboardPage: React.FC = () => {
-  const { dataState, setDataState, selectedChannelId, dateRange, syncTelemetry, connectedChannel } = useAppMode();
+  const { dataState, setDataState, selectedChannelId, dateRange, setDateRange, syncTelemetry, connectedChannel } = useAppMode();
   const navigate = useNavigate();
   const [metricTab, setMetricTab] = useState<'views' | 'watchTime' | 'subscribers'>('views');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -216,52 +216,8 @@ export const DashboardPage: React.FC = () => {
   );
 
   useEffect(() => {
-    let isMounted = true;
-    const controller = new AbortController();
-
-    async function loadData() {
-      setLoading(true);
-      setApiError(null);
-      dashboardSync.setIsSyncing(true);
-      try {
-        const response = await getDashboardOverview(selectedChannelId, days, controller.signal);
-        if (isMounted && activeChannelIdRef.current === selectedChannelId) {
-          setOverviewData(response.data);
-          setLastSyncedAt(response.last_synced_at ?? null);
-          dashboardSync.setLastSyncedAt(response.last_synced_at ?? null);
-          if (response.data_state) {
-            setDataState(response.data_state);
-          }
-          setLoading(false);
-          dashboardSync.setIsSyncing(false);
-        }
-      } catch (err: unknown) {
-        if (
-          controller.signal.aborted ||
-          axios.isCancel(err) ||
-          !isMounted ||
-          activeChannelIdRef.current !== selectedChannelId
-        ) {
-          return;
-        }
-        const normalized = normalizeApiError(err);
-        console.warn('[DashboardPage] API overview request failed:', normalized);
-        setApiError(normalized);
-        if (normalized.kind === 'unavailable') {
-          setDataState('UNAVAILABLE');
-        }
-        setLoading(false);
-        dashboardSync.setIsSyncing(false);
-      }
-    }
-
-    loadData();
-
-    return () => {
-      isMounted = false;
-      controller.abort();
-    };
-  }, [selectedChannelId, days, setDataState]);
+    fetchOverview(selectedChannelId, days);
+  }, [fetchOverview, selectedChannelId, days]);
 
   const handleManualRetry = useCallback(() => {
     fetchOverview(activeChannelIdRef.current, days);
@@ -656,30 +612,54 @@ export const DashboardPage: React.FC = () => {
               </div>
               <div className="text-sm text-zinc-300 font-medium mt-0.5">
                 {isDemo
-                  ? 'Aggregate 28-day performance trajectory'
+                  ? `Aggregate ${dateRange} performance trajectory`
                   : chartData.length === 1
                   ? '1 baseline telemetry snapshot recorded • Multi-day trend expands with subsequent daily syncs'
                   : `Aggregate ${dateRange} performance trajectory`}
               </div>
             </div>
 
-            {/* Segmented Metric Tabs */}
-            <div className="flex items-center bg-[#09090B] border border-zinc-800 rounded-md p-0.5 text-xs">
-              {(['views', 'watchTime', 'subscribers'] as const).map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setMetricTab(tab)}
-                  type="button"
-                  className={cn(
-                    'px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer',
-                    metricTab === tab
-                      ? 'bg-zinc-800 text-zinc-100 shadow-sm'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  )}
-                >
-                  {metricConfigs[tab].label}
-                </button>
-              ))}
+            {/* Range Selector & Segmented Metric Tabs */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div
+                className="flex items-center bg-[#09090B] border border-zinc-800 rounded-md p-0.5 text-xs font-mono"
+                data-testid="dashboard-date-range-selector"
+              >
+                {(['7d', '28d', '90d', '365d'] as const).map((range) => (
+                  <button
+                    key={range}
+                    onClick={() => setDateRange(range)}
+                    type="button"
+                    data-testid={`date-range-option-${range}`}
+                    className={cn(
+                      'px-2 py-1 rounded text-[11px] transition-colors cursor-pointer',
+                      dateRange === range
+                        ? 'bg-zinc-800 text-zinc-100 font-medium shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    )}
+                  >
+                    {range}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center bg-[#09090B] border border-zinc-800 rounded-md p-0.5 text-xs">
+                {(['views', 'watchTime', 'subscribers'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setMetricTab(tab)}
+                    type="button"
+                    className={cn(
+                      'px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer',
+                      metricTab === tab
+                        ? 'bg-zinc-800 text-zinc-100 shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    )}
+                  >
+                    {metricConfigs[tab].label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
