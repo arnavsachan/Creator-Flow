@@ -131,7 +131,7 @@ const DEFAULT_PIPELINE_ITEMS = [
 ];
 
 export const DashboardPage: React.FC = () => {
-  const { dataState, setDataState, selectedChannelId, dateRange } = useAppMode();
+  const { dataState, setDataState, selectedChannelId, dateRange, setDateRange, syncTelemetry, connectedChannel } = useAppMode();
   const navigate = useNavigate();
   const [metricTab, setMetricTab] = useState<'views' | 'watchTime' | 'subscribers'>('views');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -159,37 +159,82 @@ export const DashboardPage: React.FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    let isMounted = true;
-    const controller = new AbortController();
+  const fetchOverview = useCallback(
+    (targetChannel: string, lookbackDays: number) => {
+      if (retryControllerRef.current) {
+        retryControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      retryControllerRef.current = controller;
 
-    async function loadData() {
       setLoading(true);
       setApiError(null);
       dashboardSync.setIsSyncing(true);
-      try {
-        const response = await getDashboardOverview(selectedChannelId, days, controller.signal);
-        if (isMounted && activeChannelIdRef.current === selectedChannelId) {
-          setOverviewData(response.data);
-          setLastSyncedAt(response.last_synced_at ?? null);
-          dashboardSync.setLastSyncedAt(response.last_synced_at ?? null);
-          if (response.data_state) {
-            setDataState(response.data_state);
+
+      const req = getDashboardOverview(targetChannel, lookbackDays, controller.signal);
+      if (!req || typeof req.then !== 'function') {
+        setLoading(false);
+        dashboardSync.setIsSyncing(false);
+        return Promise.resolve();
+      }
+
+      return req
+        .then((res) => {
+          if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
+            return;
           }
-          setLoading(false);
-          dashboardSync.setIsSyncing(false);
-        }
-      } catch (err: unknown) {
-        if (
-          controller.signal.aborted ||
-          axios.isCancel(err) ||
-          !isMounted ||
-          activeChannelIdRef.current !== selectedChannelId
-        ) {
-          return;
-        }
+          setOverviewData(res.data);
+          setLastSyncedAt(res.last_synced_at ?? null);
+          dashboardSync.setLastSyncedAt(res.last_synced_at ?? null);
+          if (res.data_state) {
+            setDataState(res.data_state);
+          }
+        })
+        .catch((err: unknown) => {
+          if (
+            controller.signal.aborted ||
+            axios.isCancel(err) ||
+            activeChannelIdRef.current !== targetChannel
+          ) {
+            return;
+          }
+          const normalized = normalizeApiError(err);
+          console.warn('[DashboardPage] Overview request failed:', normalized);
+          setApiError(normalized);
+          if (normalized.kind === 'unavailable') {
+            setDataState('UNAVAILABLE');
+          }
+        })
+        .finally(() => {
+          if (retryControllerRef.current === controller) {
+            setLoading(false);
+            dashboardSync.setIsSyncing(false);
+          }
+        });
+    },
+    [setDataState]
+  );
+
+  useEffect(() => {
+    fetchOverview(selectedChannelId, days);
+  }, [fetchOverview, selectedChannelId, days]);
+
+  const handleManualRetry = useCallback(() => {
+    fetchOverview(activeChannelIdRef.current, days);
+  }, [fetchOverview, days]);
+
+  const handleSyncNow = useCallback(async () => {
+    if (loading) return;
+    if (!isDemo && connectedChannel) {
+      setLoading(true);
+      dashboardSync.setIsSyncing(true);
+      setApiError(null);
+      try {
+        await syncTelemetry();
+        await fetchOverview(activeChannelIdRef.current, days);
+      } catch (err) {
         const normalized = normalizeApiError(err);
-        console.warn('[DashboardPage] API overview request failed:', normalized);
+        console.warn('[DashboardPage] Sync telemetry failed:', normalized);
         setApiError(normalized);
         if (normalized.kind === 'unavailable') {
           setDataState('UNAVAILABLE');
@@ -197,66 +242,18 @@ export const DashboardPage: React.FC = () => {
         setLoading(false);
         dashboardSync.setIsSyncing(false);
       }
+    } else {
+      fetchOverview(activeChannelIdRef.current, days);
     }
+  }, [loading, isDemo, connectedChannel, syncTelemetry, fetchOverview, days, setDataState]);
 
-    loadData();
-
-    return () => {
-      isMounted = false;
-      controller.abort();
-    };
-  }, [selectedChannelId, days, setDataState]);
-
-  const handleManualRetry = useCallback(() => {
-    if (loading) return;
-    const targetChannel = activeChannelIdRef.current;
-
-    if (retryControllerRef.current) {
-      retryControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    retryControllerRef.current = controller;
-
-    setLoading(true);
-    setApiError(null);
-    dashboardSync.setIsSyncing(true);
-
-    getDashboardOverview(targetChannel, days, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
-          return;
-        }
-        setOverviewData(res.data);
-        setLastSyncedAt(res.last_synced_at ?? null);
-        dashboardSync.setLastSyncedAt(res.last_synced_at ?? null);
-        if (res.data_state) {
-          setDataState(res.data_state);
-        }
-        setLoading(false);
-        dashboardSync.setIsSyncing(false);
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
-          return;
-        }
-        const normalized = normalizeApiError(err);
-        console.warn('[DashboardPage] Manual retry failed:', normalized);
-        setApiError(normalized);
-        if (normalized.kind === 'unavailable') {
-          setDataState('UNAVAILABLE');
-        }
-        setLoading(false);
-        dashboardSync.setIsSyncing(false);
-      });
-  }, [loading, days, setDataState]);
-
-  // Listen to manual sync triggers from Topbar/DataStateBanner
+  // Listen to manual sync triggers from Topbar/DataStateBanner/ChannelsPage
   useEffect(() => {
     const unsubscribe = dashboardSync.subscribeSyncTrigger(() => {
-      handleManualRetry();
+      fetchOverview(activeChannelIdRef.current, days);
     });
     return unsubscribe;
-  }, [handleManualRetry]);
+  }, [fetchOverview, days]);
 
   // Prevent displaying stale metrics after channel switches
   const channelData = overviewData?.channelId === selectedChannelId ? overviewData : null;
@@ -518,7 +515,7 @@ export const DashboardPage: React.FC = () => {
             <span>Upstream sync delayed. Displaying cached channel snapshot.</span>
           </div>
           <button
-            onClick={handleManualRetry}
+            onClick={handleSyncNow}
             disabled={loading}
             type="button"
             className={cn(
@@ -615,30 +612,54 @@ export const DashboardPage: React.FC = () => {
               </div>
               <div className="text-sm text-zinc-300 font-medium mt-0.5">
                 {isDemo
-                  ? 'Aggregate 28-day performance trajectory'
+                  ? `Aggregate ${dateRange} performance trajectory`
                   : chartData.length === 1
                   ? '1 baseline telemetry snapshot recorded • Multi-day trend expands with subsequent daily syncs'
                   : `Aggregate ${dateRange} performance trajectory`}
               </div>
             </div>
 
-            {/* Segmented Metric Tabs */}
-            <div className="flex items-center bg-[#09090B] border border-zinc-800 rounded-md p-0.5 text-xs">
-              {(['views', 'watchTime', 'subscribers'] as const).map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setMetricTab(tab)}
-                  type="button"
-                  className={cn(
-                    'px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer',
-                    metricTab === tab
-                      ? 'bg-zinc-800 text-zinc-100 shadow-sm'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  )}
-                >
-                  {metricConfigs[tab].label}
-                </button>
-              ))}
+            {/* Range Selector & Segmented Metric Tabs */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div
+                className="flex items-center bg-[#09090B] border border-zinc-800 rounded-md p-0.5 text-xs font-mono"
+                data-testid="dashboard-date-range-selector"
+              >
+                {(['7d', '28d', '90d', '365d'] as const).map((range) => (
+                  <button
+                    key={range}
+                    onClick={() => setDateRange(range)}
+                    type="button"
+                    data-testid={`date-range-option-${range}`}
+                    className={cn(
+                      'px-2 py-1 rounded text-[11px] transition-colors cursor-pointer',
+                      dateRange === range
+                        ? 'bg-zinc-800 text-zinc-100 font-medium shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    )}
+                  >
+                    {range}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center bg-[#09090B] border border-zinc-800 rounded-md p-0.5 text-xs">
+                {(['views', 'watchTime', 'subscribers'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setMetricTab(tab)}
+                    type="button"
+                    className={cn(
+                      'px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer',
+                      metricTab === tab
+                        ? 'bg-zinc-800 text-zinc-100 shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    )}
+                  >
+                    {metricConfigs[tab].label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -682,7 +703,7 @@ export const DashboardPage: React.FC = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={handleManualRetry}
+                  onClick={handleSyncNow}
                   disabled={loading}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700/80 transition-colors cursor-pointer disabled:opacity-50"
                   data-testid="sync-now-insufficient-history"

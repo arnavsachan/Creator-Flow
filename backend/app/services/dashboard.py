@@ -21,15 +21,21 @@ SUPPORTED_CHANNEL_IDS = {
 }
 
 
-def build_demo_chart_points(base_date: Optional[date] = None) -> list[VelocityChartPoint]:
+def build_demo_chart_points(
+    days: int = 28,
+    base_date: Optional[date] = None,
+) -> list[VelocityChartPoint]:
     """
-    Build 10 time-series points spanning the past 27 days up to base_date (today).
+    Build 10 time-series points spanning the requested lookback window up to base_date (today).
     Guarantees all points are strictly in the past or present, never in the future.
     """
     if base_date is None:
         base_date = datetime.now(timezone.utc).date()
 
-    day_offsets = [27, 24, 21, 18, 15, 12, 9, 6, 3, 0]
+    n_points = 10
+    day_offsets = [round((days * (n_points - 1 - i)) / (n_points - 1)) for i in range(n_points)]
+    day_offsets[-1] = 0
+
     raw_series = [
         (34200, 1820, 120),
         (42100, 2190, 195),
@@ -46,18 +52,24 @@ def build_demo_chart_points(base_date: Optional[date] = None) -> list[VelocityCh
     points: list[VelocityChartPoint] = []
     for offset, (views, watch_time, subscribers) in zip(day_offsets, raw_series):
         point_date = base_date - timedelta(days=offset)
+        date_str = (
+            point_date.strftime("%b %d '%y")
+            if days > 180
+            else point_date.strftime("%b %d")
+        )
         points.append(
             VelocityChartPoint(
-                date=point_date.strftime("%b %d"),
+                date=date_str,
                 views=views,
                 watch_time=watch_time,
                 subscribers=subscribers,
+                timestamp=datetime.combine(point_date, datetime.min.time(), tzinfo=timezone.utc).isoformat(),
             )
         )
     return points
 
 
-def build_demo_kpis() -> DashboardKpis:
+def build_demo_kpis(days: int = 28) -> DashboardKpis:
     return DashboardKpis(
         total_views=KpiMetric(
             title="Total Views",
@@ -66,7 +78,7 @@ def build_demo_kpis() -> DashboardKpis:
             change=18.4,
             formatted_change="+18.4%",
             trend="up",
-            change_period="vs previous 28d",
+            change_period=f"vs previous {days}d",
             sparkline_points=[28, 32, 30, 42, 45, 50, 48, 62, 70, 68, 82],
         ),
         net_subscribers=KpiMetric(
@@ -76,7 +88,7 @@ def build_demo_kpis() -> DashboardKpis:
             change=12.6,
             formatted_change="+12.6%",
             trend="up",
-            change_period="vs previous 28d",
+            change_period=f"vs previous {days}d",
             sparkline_points=[10, 14, 12, 19, 22, 25, 29, 31, 38, 42, 48],
         ),
         watch_time_hours=KpiMetric(
@@ -86,7 +98,7 @@ def build_demo_kpis() -> DashboardKpis:
             change=24.1,
             formatted_change="+24.1%",
             trend="up",
-            change_period="vs previous 28d",
+            change_period=f"vs previous {days}d",
             sparkline_points=[35, 38, 42, 40, 52, 58, 62, 60, 72, 79, 85],
         ),
         estimated_partner_revenue=KpiMetric(
@@ -354,7 +366,10 @@ def get_dashboard_overview(
             # Ensure an initial snapshot exists if none have been recorded yet
             existing_snapshots_count = (
                 db.query(ChannelSnapshot)
-                .filter(ChannelSnapshot.channel_id == target_channel)
+                .filter(
+                    ChannelSnapshot.channel_id == target_channel,
+                    ChannelSnapshot.sync_status == "success",
+                )
                 .count()
             )
             if existing_snapshots_count == 0:
@@ -368,7 +383,11 @@ def get_dashboard_overview(
                 )
 
             # Query historical snapshots for requested date range
-            snapshots = get_channel_snapshots(db, target_channel, days=days)
+            snapshots = [
+                s
+                for s in get_channel_snapshots(db, target_channel, days=days)
+                if s.sync_status == "success"
+            ]
 
             # Compute change & sparkline points if multiple snapshots exist
             views_change: Optional[float] = None
@@ -434,16 +453,29 @@ def get_dashboard_overview(
                 estimated_partner_revenue=None,
             )
 
-            # Map velocity chart points from real database snapshots
-            velocity_chart = [
-                VelocityChartPoint(
-                    date=s.snapshot_at.strftime("%b %d"),
-                    views=s.view_count,
-                    watch_time=0,
-                    subscribers=s.subscriber_count,
+            # Map velocity chart points from real database snapshots.
+            # If multiple snapshots fall on the same calendar day, format with time (%b %d, %H:%M)
+            # to prevent duplicate identical labels on the X-axis.
+            unique_dates = {s.snapshot_at.strftime("%b %d") for s in snapshots}
+            has_same_day_points = len(unique_dates) < len(snapshots)
+
+            velocity_chart = []
+            for s in snapshots:
+                if has_same_day_points:
+                    formatted_date = s.snapshot_at.strftime("%b %d, %H:%M")
+                elif days > 180 or (snapshots[-1].snapshot_at.year != snapshots[0].snapshot_at.year):
+                    formatted_date = s.snapshot_at.strftime("%b %d '%y")
+                else:
+                    formatted_date = s.snapshot_at.strftime("%b %d")
+                velocity_chart.append(
+                    VelocityChartPoint(
+                        date=formatted_date,
+                        views=s.view_count,
+                        watch_time=0,
+                        subscribers=s.subscriber_count,
+                        timestamp=s.snapshot_at.isoformat() if s.snapshot_at else None,
+                    )
                 )
-                for s in snapshots
-            ]
 
             # Query real recent videos from database
             stored_videos = get_channel_videos(db, target_channel, limit=10)
@@ -483,8 +515,8 @@ def get_dashboard_overview(
     if target_channel in SUPPORTED_CHANNEL_IDS:
         overview_data = DashboardOverviewData(
             channel_id=target_channel,
-            kpis=build_demo_kpis(),
-            velocity_chart=build_demo_chart_points(),
+            kpis=build_demo_kpis(days=days),
+            velocity_chart=build_demo_chart_points(days=days),
             actionable_insights=build_demo_insights(),
             recent_videos=build_demo_recent_videos(),
             content_pipeline=build_demo_pipeline_items(),

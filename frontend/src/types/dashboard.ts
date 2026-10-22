@@ -23,6 +23,7 @@ export interface VelocityChartPoint {
   views: number;
   watchTime: number;
   subscribers: number;
+  timestamp?: string;
 }
 
 export interface ActionableInsight {

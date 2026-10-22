@@ -1,10 +1,11 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppModeProvider, useAppMode } from '../context/AppModeContext';
 import { DashboardPage } from './DashboardPage';
 import * as dashboardService from '../services/dashboardService';
+import * as youtubeService from '../services/youtubeService';
 import type { DashboardOverviewResponse } from '../types/dashboard';
 
 vi.mock('../services/dashboardService', () => ({
@@ -14,7 +15,14 @@ vi.mock('../services/dashboardService', () => ({
   },
 }));
 
+vi.mock('../services/youtubeService', () => ({
+  getConnectionStatus: vi.fn(),
+  syncChannel: vi.fn(),
+}));
+
 const mockGetDashboardOverview = vi.mocked(dashboardService.getDashboardOverview);
+const mockGetConnectionStatus = vi.mocked(youtubeService.getConnectionStatus);
+const mockSyncChannel = vi.mocked(youtubeService.syncChannel);
 
 const createMockSuccessResponse = (
   channelId: string,
@@ -91,6 +99,7 @@ describe('DashboardPage Reliability Tests', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    mockGetConnectionStatus.mockRejectedValue(new Error('Network Error'));
   });
 
   // a. LIVE failure renders no synthetic KPI values
@@ -480,4 +489,399 @@ describe('DashboardPage Reliability Tests', () => {
     ).toBeInTheDocument();
     expect(screen.getByTestId('sync-now-insufficient-history')).toBeInTheDocument();
   });
+
+  // j. clicking Sync Now in insufficient history state triggers syncTelemetry and refetches dashboard overview
+  it('j. clicking Sync Now in insufficient history state triggers syncTelemetry and refetches dashboard overview', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'chan-001',
+        channelId: 'uc-live-001',
+        title: 'Live Channel',
+        subscriberCount: 100,
+        videoCount: 10,
+        viewCount: 1000,
+        status: 'connected',
+        connectedAt: '2026-10-22T19:00:00Z',
+        lastSyncedAt: '2026-10-22T20:00:00Z',
+      },
+    });
+
+    const baseData = createMockSuccessResponse('uc-live-001').data!;
+    const singleSnapshotData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22', views: 4500, watchTime: 0, subscribers: 120 },
+        ],
+      },
+    });
+
+    const twoSnapshotsData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22', views: 4500, watchTime: 0, subscribers: 120 },
+          { date: 'Oct 22', views: 5000, watchTime: 0, subscribers: 125 },
+        ],
+      },
+    });
+
+    mockGetDashboardOverview.mockResolvedValueOnce(singleSnapshotData);
+    mockSyncChannel.mockResolvedValue({
+      id: 'chan-001',
+      channelId: 'uc-live-001',
+      title: 'Live Channel',
+      subscriberCount: 125,
+      videoCount: 10,
+      viewCount: 5000,
+      status: 'connected',
+      connectedAt: '2026-10-22T19:00:00Z',
+      lastSyncedAt: '2026-10-22T20:30:00Z',
+    });
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('insufficient-history-state')).toBeInTheDocument();
+    });
+
+    mockGetDashboardOverview.mockResolvedValue(twoSnapshotsData);
+
+    const syncButton = screen.getByTestId('sync-now-insufficient-history');
+    await act(async () => {
+      syncButton.click();
+    });
+
+    await waitFor(() => {
+      expect(mockSyncChannel).toHaveBeenCalled();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('insufficient-history-state')).not.toBeInTheDocument();
+    });
+  });
+
+  // k. sync telemetry failure surfaces error banner without leaving a permanently active loading indicator
+  it('k. sync telemetry failure surfaces error banner without leaving a permanently active loading indicator', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'chan-001',
+        channelId: 'uc-live-001',
+        title: 'Live Channel',
+        subscriberCount: 100,
+        videoCount: 10,
+        viewCount: 1000,
+        status: 'connected',
+        connectedAt: '2026-10-22T19:00:00Z',
+        lastSyncedAt: '2026-10-22T20:00:00Z',
+      },
+    });
+
+    const baseData = createMockSuccessResponse('uc-live-001').data!;
+    const singleSnapshotData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22', views: 4500, watchTime: 0, subscribers: 120 },
+        ],
+      },
+    });
+
+    mockGetDashboardOverview.mockResolvedValueOnce(singleSnapshotData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('insufficient-history-state')).toBeInTheDocument();
+    });
+
+    const syncButton = screen.getByTestId('sync-now-insufficient-history');
+    expect(syncButton).not.toBeDisabled();
+
+    // Mock telemetry sync failure with a server error
+    mockSyncChannel.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: {
+        status: 500,
+        data: { message: 'YouTube telemetry sync failed' },
+      },
+      message: 'Internal Server Error',
+    });
+
+    await act(async () => {
+      syncButton.click();
+    });
+
+    await waitFor(() => {
+      expect(mockSyncChannel).toHaveBeenCalled();
+    });
+
+    // Error banner should be surfaced, not swallowed
+    await waitFor(() => {
+      expect(screen.getByTestId('api-error-banner')).toBeInTheDocument();
+    });
+
+    // Loading should be deactivated, button should be re-enabled
+    expect(syncButton).not.toBeDisabled();
+  });
+
+  // l. demo mode clicking sync now refetches overview without calling syncTelemetry
+  it('l. demo mode clicking sync now refetches overview without calling syncTelemetry', async () => {
+    const demoData = createMockSuccessResponse('demo-channel-1', {
+      data_state: 'STALE',
+    });
+    mockGetDashboardOverview.mockResolvedValue(demoData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="STALE" initialChannelId="demo-channel-1">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('stale-banner')).toBeInTheDocument();
+    });
+
+    const staleBanner = screen.getByTestId('stale-banner');
+    const syncButton = within(staleBanner).getByRole('button', { name: /sync now/i });
+    expect(syncButton).not.toBeDisabled();
+
+    await act(async () => {
+      syncButton.click();
+    });
+
+    await waitFor(() => {
+      // Called on mount and again on sync
+      expect(mockGetDashboardOverview).toHaveBeenCalledTimes(2);
+    });
+
+    // Live YouTube sync must NOT be called in demo mode
+    expect(mockSyncChannel).not.toHaveBeenCalled();
+    expect(syncButton).not.toBeDisabled();
+  });
+
+  // m. date range selection updates requested lookback days and refetches overview
+  it('m. date range selection updates requested lookback days and refetches overview', async () => {
+    const liveData = createMockSuccessResponse('uc-live-001');
+    mockGetDashboardOverview.mockResolvedValue(liveData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001" initialDateRange="28d">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Initial mount fetches with 28 days
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 28, expect.any(AbortSignal));
+    });
+
+    // Click 90d option
+    const btn90 = screen.getByTestId('date-range-option-90d');
+    await act(async () => {
+      btn90.click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 90, expect.any(AbortSignal));
+    });
+
+    // Click 7d option
+    const btn7 = screen.getByTestId('date-range-option-7d');
+    await act(async () => {
+      btn7.click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 7, expect.any(AbortSignal));
+    });
+
+    // Click 365d option
+    const btn365 = screen.getByTestId('date-range-option-365d');
+    await act(async () => {
+      btn365.click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('uc-live-001', 365, expect.any(AbortSignal));
+    });
+  });
+
+  // n. chart renders multiple same-day snapshot timestamps cleanly
+  it('n. chart renders multiple same-day snapshot timestamps cleanly', async () => {
+    const baseData = createMockSuccessResponse('uc-live-001').data!;
+    const sameDayMultiSnapshot = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22, 20:57', views: 585281, watchTime: 0, subscribers: 1200 },
+          { date: 'Oct 22, 22:49', views: 585281, watchTime: 0, subscribers: 1200 },
+        ],
+      },
+    });
+    mockGetDashboardOverview.mockResolvedValue(sameDayMultiSnapshot);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001" initialDateRange="90d">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // With 2 points, insufficient history card should NOT be shown
+    await waitFor(() => {
+      expect(screen.queryByTestId('insufficient-history-state')).not.toBeInTheDocument();
+    });
+
+    // Trajectory subtitle should reflect the selected range
+    expect(screen.getByText('Aggregate 90d performance trajectory')).toBeInTheDocument();
+  });
+
+  // o. live mode 7d -> 28d -> 90d -> 365d transitions verify selected state, API params, and response handling
+  it('o. live mode 7d -> 28d -> 90d -> 365d transitions verify selected state, API params, and response handling', async () => {
+    const baseData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg').data!;
+    const liveOverviewData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg', {
+      data: {
+        ...baseData,
+        channelId: 'UCEf4pkTHK7lokchUozkSQPg',
+        velocityChart: [
+          { date: 'Oct 22, 20:57', views: 585281, watchTime: 0, subscribers: 3510 },
+          { date: 'Oct 22, 22:49', views: 585281, watchTime: 0, subscribers: 3510 },
+        ],
+      },
+    });
+    mockGetDashboardOverview.mockResolvedValue(liveOverviewData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="UCEf4pkTHK7lokchUozkSQPg" initialDateRange="7d">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Initial state: 7d selected
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 7, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-7d').className).toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 7d performance trajectory')).toBeInTheDocument();
+
+    // Transition 1: Click 28d
+    await act(async () => {
+      screen.getByTestId('date-range-option-28d').click();
+    });
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 28, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-28d').className).toContain('text-zinc-100');
+    expect(screen.getByTestId('date-range-option-7d').className).not.toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 28d performance trajectory')).toBeInTheDocument();
+
+    // Transition 2: Click 90d
+    await act(async () => {
+      screen.getByTestId('date-range-option-90d').click();
+    });
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 90, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-90d').className).toContain('text-zinc-100');
+    expect(screen.getByTestId('date-range-option-28d').className).not.toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 90d performance trajectory')).toBeInTheDocument();
+
+    // Transition 3: Click 365d
+    await act(async () => {
+      screen.getByTestId('date-range-option-365d').click();
+    });
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 365, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-365d').className).toContain('text-zinc-100');
+    expect(screen.getByTestId('date-range-option-90d').className).not.toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 365d performance trajectory')).toBeInTheDocument();
+  });
+
+  // p. selected date range persists across page reload via localStorage
+  it('p. selected date range persists across page reload via localStorage', async () => {
+    localStorage.clear();
+    const baseData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg').data!;
+    const liveOverviewData = createMockSuccessResponse('UCEf4pkTHK7lokchUozkSQPg', {
+      data: {
+        ...baseData,
+        channelId: 'UCEf4pkTHK7lokchUozkSQPg',
+        velocityChart: [
+          { date: 'Oct 22, 20:57', views: 585281, watchTime: 0, subscribers: 3510 },
+          { date: 'Oct 22, 22:49', views: 585281, watchTime: 0, subscribers: 3510 },
+        ],
+      },
+    });
+    mockGetDashboardOverview.mockResolvedValue(liveOverviewData);
+
+    // Initial session: mount and select 90d
+    const { unmount } = render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="UCEf4pkTHK7lokchUozkSQPg">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalled();
+    });
+
+    // Select 90d
+    await act(async () => {
+      screen.getByTestId('date-range-option-90d').click();
+    });
+
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenLastCalledWith('UCEf4pkTHK7lokchUozkSQPg', 90, expect.any(AbortSignal));
+    });
+    expect(localStorage.getItem('app_date_range')).toBe('90d');
+
+    // Simulate page reload: unmount previous component tree
+    unmount();
+    mockGetDashboardOverview.mockClear();
+
+    // Re-render as a new page load (reading from localStorage)
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="UCEf4pkTHK7lokchUozkSQPg">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    // Verify persisted 90d range was restored on mount
+    await waitFor(() => {
+      expect(mockGetDashboardOverview).toHaveBeenCalledWith('UCEf4pkTHK7lokchUozkSQPg', 90, expect.any(AbortSignal));
+    });
+    expect(screen.getByTestId('date-range-option-90d').className).toContain('text-zinc-100');
+    expect(screen.getByText('Aggregate 90d performance trajectory')).toBeInTheDocument();
+  });
 });
+

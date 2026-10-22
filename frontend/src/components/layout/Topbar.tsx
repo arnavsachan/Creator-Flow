@@ -112,12 +112,16 @@ export const Topbar: React.FC<TopbarProps> = ({ onRefresh, isSyncing = false }) 
       {/* Right: Date Range, State Toolbar, and Sync */}
       <div className="flex items-center gap-3">
         {/* Date Range Segmented Control */}
-        <div className="hidden lg:flex items-center bg-zinc-900 border border-zinc-800/80 rounded-md p-0.5 text-xs font-mono">
+        <div
+          data-testid="topbar-date-range-selector"
+          className="flex items-center bg-zinc-900 border border-zinc-800/80 rounded-md p-0.5 text-xs font-mono"
+        >
           {(['7d', '28d', '90d', '365d'] as const).map((range) => (
             <button
               key={range}
               onClick={() => setDateRange(range)}
               type="button"
+              data-testid={`topbar-date-range-${range}`}
               className={cn(
                 'px-2 py-1 rounded text-[11px] transition-colors cursor-pointer',
                 dateRange === range

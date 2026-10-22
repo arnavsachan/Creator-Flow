@@ -25,12 +25,14 @@ interface AppModeProviderProps {
   children: React.ReactNode;
   initialDataState?: DataState;
   initialChannelId?: string;
+  initialDateRange?: DateRangeOption;
 }
 
 export const AppModeProvider: React.FC<AppModeProviderProps> = ({
   children,
   initialDataState = 'DEMO',
   initialChannelId = 'demo-channel-1',
+  initialDateRange,
 }) => {
   const [dataState, setDataState] = useState<DataState>(() => {
     const saved = localStorage.getItem('app_data_state') as DataState | null;
@@ -43,7 +45,16 @@ export const AppModeProvider: React.FC<AppModeProviderProps> = ({
   });
 
   const [connectedChannel, setConnectedChannel] = useState<ConnectedChannel | null>(null);
-  const [dateRange, setDateRange] = useState<DateRangeOption>('28d');
+  const [dateRange, setDateRangeState] = useState<DateRangeOption>(() => {
+    if (initialDateRange) return initialDateRange;
+    const saved = localStorage.getItem('app_date_range') as DateRangeOption | null;
+    return saved && ['7d', '28d', '90d', '365d'].includes(saved) ? saved : '28d';
+  });
+
+  const setDateRange = useCallback((range: DateRangeOption) => {
+    setDateRangeState(range);
+    localStorage.setItem('app_date_range', range);
+  }, []);
 
   const setSelectedChannelId = useCallback((channelId: string) => {
     setSelectedChannelIdState(channelId);
