@@ -331,3 +331,87 @@ def test_dashboard_overview_live_channel_with_snapshots_and_videos(client: TestC
     assert data["recentVideos"][0]["formattedViews"] == "6,000"
     assert data["recentVideos"][0]["avd"] == "—"
     assert data["recentVideos"][0]["ctr"] == "—"
+
+
+def test_dashboard_overview_live_snapshot_trajectory_and_failed_snapshot_filtering(client: TestClient, db_session):
+    """
+    Verifies that:
+    1. Single baseline snapshot yields 1 chart point and 'Initial baseline snapshot' change period.
+    2. Failed snapshots are excluded from the growth velocity trajectory.
+    3. Adding a subsequent successful snapshot expands the chart to multiple points and computes velocity trends.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.models.channel import ConnectedChannel
+    from app.models.snapshot import ChannelSnapshot
+    from app.models.user import User
+    from app.services.youtube_oauth import record_channel_snapshot
+
+    user = User(id="user_snap_filt", email="snapfilt@example.com", is_active=True)
+    db_session.add(user)
+    db_session.commit()
+
+    live_ch = ConnectedChannel(
+        id="chan_snap_filt",
+        user_id="user_snap_filt",
+        platform="youtube",
+        channel_id="UC_SNAP_FILT",
+        title="Snapshot Filtering Studio",
+        subscriber_count=100,
+        video_count=10,
+        view_count=5000,
+        status="connected",
+        last_synced_at=datetime.now(timezone.utc),
+    )
+    db_session.add(live_ch)
+    db_session.commit()
+
+    # 1. First snapshot (baseline)
+    s1 = record_channel_snapshot(
+        db=db_session,
+        channel_id="UC_SNAP_FILT",
+        subscriber_count=100,
+        video_count=10,
+        view_count=5000,
+        sync_status="success",
+    )
+    # Also add a failed snapshot to test filtering
+    s_failed = record_channel_snapshot(
+        db=db_session,
+        channel_id="UC_SNAP_FILT",
+        subscriber_count=100,
+        video_count=10,
+        view_count=5000,
+        sync_status="failed",
+        error_message="API quota exceeded",
+        cooldown_minutes=0,
+    )
+
+    res1 = client.get("/api/v1/dashboard/overview?channel_id=UC_SNAP_FILT&days=28")
+    assert res1.status_code == 200
+    data1 = res1.json()["data"]
+    # Failed snapshot was filtered out, only 1 valid baseline point
+    assert len(data1["velocityChart"]) == 1
+    assert data1["kpis"]["totalViews"]["changePeriod"] == "Initial baseline snapshot"
+
+    # 2. Subsequent successful sync snapshot outside cooldown
+    now = datetime.now(timezone.utc)
+    s2 = ChannelSnapshot(
+        channel_id="UC_SNAP_FILT",
+        snapshot_at=now + timedelta(minutes=20),
+        subscriber_count=110,
+        video_count=11,
+        view_count=6000,
+        sync_status="success",
+    )
+    db_session.add(s2)
+    db_session.commit()
+
+    res2 = client.get("/api/v1/dashboard/overview?channel_id=UC_SNAP_FILT&days=28")
+    assert res2.status_code == 200
+    data2 = res2.json()["data"]
+    # Now 2 points in growth velocity trajectory
+    assert len(data2["velocityChart"]) == 2
+    assert data2["velocityChart"][0]["views"] == 5000
+    assert data2["velocityChart"][1]["views"] == 6000
+    assert data2["kpis"]["totalViews"]["change"] == 20.0
+    assert data2["kpis"]["totalViews"]["trend"] == "up"

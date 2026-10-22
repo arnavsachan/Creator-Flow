@@ -354,7 +354,10 @@ def get_dashboard_overview(
             # Ensure an initial snapshot exists if none have been recorded yet
             existing_snapshots_count = (
                 db.query(ChannelSnapshot)
-                .filter(ChannelSnapshot.channel_id == target_channel)
+                .filter(
+                    ChannelSnapshot.channel_id == target_channel,
+                    ChannelSnapshot.sync_status == "success",
+                )
                 .count()
             )
             if existing_snapshots_count == 0:
@@ -368,7 +371,11 @@ def get_dashboard_overview(
                 )
 
             # Query historical snapshots for requested date range
-            snapshots = get_channel_snapshots(db, target_channel, days=days)
+            snapshots = [
+                s
+                for s in get_channel_snapshots(db, target_channel, days=days)
+                if s.sync_status == "success"
+            ]
 
             # Compute change & sparkline points if multiple snapshots exist
             views_change: Optional[float] = None

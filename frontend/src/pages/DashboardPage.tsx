@@ -131,7 +131,7 @@ const DEFAULT_PIPELINE_ITEMS = [
 ];
 
 export const DashboardPage: React.FC = () => {
-  const { dataState, setDataState, selectedChannelId, dateRange } = useAppMode();
+  const { dataState, setDataState, selectedChannelId, dateRange, syncTelemetry, connectedChannel } = useAppMode();
   const navigate = useNavigate();
   const [metricTab, setMetricTab] = useState<'views' | 'watchTime' | 'subscribers'>('views');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -158,6 +158,62 @@ export const DashboardPage: React.FC = () => {
       }
     };
   }, []);
+
+  const fetchOverview = useCallback(
+    (targetChannel: string, lookbackDays: number) => {
+      if (retryControllerRef.current) {
+        retryControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      retryControllerRef.current = controller;
+
+      setLoading(true);
+      setApiError(null);
+      dashboardSync.setIsSyncing(true);
+
+      const req = getDashboardOverview(targetChannel, lookbackDays, controller.signal);
+      if (!req || typeof req.then !== 'function') {
+        setLoading(false);
+        dashboardSync.setIsSyncing(false);
+        return Promise.resolve();
+      }
+
+      return req
+        .then((res) => {
+          if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
+            return;
+          }
+          setOverviewData(res.data);
+          setLastSyncedAt(res.last_synced_at ?? null);
+          dashboardSync.setLastSyncedAt(res.last_synced_at ?? null);
+          if (res.data_state) {
+            setDataState(res.data_state);
+          }
+        })
+        .catch((err: unknown) => {
+          if (
+            controller.signal.aborted ||
+            axios.isCancel(err) ||
+            activeChannelIdRef.current !== targetChannel
+          ) {
+            return;
+          }
+          const normalized = normalizeApiError(err);
+          console.warn('[DashboardPage] Overview request failed:', normalized);
+          setApiError(normalized);
+          if (normalized.kind === 'unavailable') {
+            setDataState('UNAVAILABLE');
+          }
+        })
+        .finally(() => {
+          if (retryControllerRef.current === controller) {
+            setLoading(false);
+            dashboardSync.setIsSyncing(false);
+          }
+        });
+    },
+    [setDataState]
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -208,55 +264,40 @@ export const DashboardPage: React.FC = () => {
   }, [selectedChannelId, days, setDataState]);
 
   const handleManualRetry = useCallback(() => {
+    fetchOverview(activeChannelIdRef.current, days);
+  }, [fetchOverview, days]);
+
+  const handleSyncNow = useCallback(async () => {
     if (loading) return;
-    const targetChannel = activeChannelIdRef.current;
-
-    if (retryControllerRef.current) {
-      retryControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    retryControllerRef.current = controller;
-
-    setLoading(true);
-    setApiError(null);
-    dashboardSync.setIsSyncing(true);
-
-    getDashboardOverview(targetChannel, days, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
-          return;
-        }
-        setOverviewData(res.data);
-        setLastSyncedAt(res.last_synced_at ?? null);
-        dashboardSync.setLastSyncedAt(res.last_synced_at ?? null);
-        if (res.data_state) {
-          setDataState(res.data_state);
-        }
-        setLoading(false);
-        dashboardSync.setIsSyncing(false);
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted || activeChannelIdRef.current !== targetChannel) {
-          return;
-        }
+    if (!isDemo && connectedChannel) {
+      setLoading(true);
+      dashboardSync.setIsSyncing(true);
+      setApiError(null);
+      try {
+        await syncTelemetry();
+        await fetchOverview(activeChannelIdRef.current, days);
+      } catch (err) {
         const normalized = normalizeApiError(err);
-        console.warn('[DashboardPage] Manual retry failed:', normalized);
+        console.warn('[DashboardPage] Sync telemetry failed:', normalized);
         setApiError(normalized);
         if (normalized.kind === 'unavailable') {
           setDataState('UNAVAILABLE');
         }
         setLoading(false);
         dashboardSync.setIsSyncing(false);
-      });
-  }, [loading, days, setDataState]);
+      }
+    } else {
+      fetchOverview(activeChannelIdRef.current, days);
+    }
+  }, [loading, isDemo, connectedChannel, syncTelemetry, fetchOverview, days, setDataState]);
 
-  // Listen to manual sync triggers from Topbar/DataStateBanner
+  // Listen to manual sync triggers from Topbar/DataStateBanner/ChannelsPage
   useEffect(() => {
     const unsubscribe = dashboardSync.subscribeSyncTrigger(() => {
-      handleManualRetry();
+      fetchOverview(activeChannelIdRef.current, days);
     });
     return unsubscribe;
-  }, [handleManualRetry]);
+  }, [fetchOverview, days]);
 
   // Prevent displaying stale metrics after channel switches
   const channelData = overviewData?.channelId === selectedChannelId ? overviewData : null;
@@ -518,7 +559,7 @@ export const DashboardPage: React.FC = () => {
             <span>Upstream sync delayed. Displaying cached channel snapshot.</span>
           </div>
           <button
-            onClick={handleManualRetry}
+            onClick={handleSyncNow}
             disabled={loading}
             type="button"
             className={cn(
@@ -682,7 +723,7 @@ export const DashboardPage: React.FC = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={handleManualRetry}
+                  onClick={handleSyncNow}
                   disabled={loading}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700/80 transition-colors cursor-pointer disabled:opacity-50"
                   data-testid="sync-now-insufficient-history"

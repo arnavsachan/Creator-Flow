@@ -1,10 +1,11 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppModeProvider, useAppMode } from '../context/AppModeContext';
 import { DashboardPage } from './DashboardPage';
 import * as dashboardService from '../services/dashboardService';
+import * as youtubeService from '../services/youtubeService';
 import type { DashboardOverviewResponse } from '../types/dashboard';
 
 vi.mock('../services/dashboardService', () => ({
@@ -14,7 +15,14 @@ vi.mock('../services/dashboardService', () => ({
   },
 }));
 
+vi.mock('../services/youtubeService', () => ({
+  getConnectionStatus: vi.fn(),
+  syncChannel: vi.fn(),
+}));
+
 const mockGetDashboardOverview = vi.mocked(dashboardService.getDashboardOverview);
+const mockGetConnectionStatus = vi.mocked(youtubeService.getConnectionStatus);
+const mockSyncChannel = vi.mocked(youtubeService.syncChannel);
 
 const createMockSuccessResponse = (
   channelId: string,
@@ -91,6 +99,7 @@ describe('DashboardPage Reliability Tests', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    mockGetConnectionStatus.mockRejectedValue(new Error('Network Error'));
   });
 
   // a. LIVE failure renders no synthetic KPI values
@@ -479,5 +488,194 @@ describe('DashboardPage Reliability Tests', () => {
       screen.getByText('Insufficient History for Growth Trajectory')
     ).toBeInTheDocument();
     expect(screen.getByTestId('sync-now-insufficient-history')).toBeInTheDocument();
+  });
+
+  // j. clicking Sync Now in insufficient history state triggers syncTelemetry and refetches dashboard overview
+  it('j. clicking Sync Now in insufficient history state triggers syncTelemetry and refetches dashboard overview', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'chan-001',
+        channelId: 'uc-live-001',
+        title: 'Live Channel',
+        subscriberCount: 100,
+        videoCount: 10,
+        viewCount: 1000,
+        status: 'connected',
+        connectedAt: '2026-10-22T19:00:00Z',
+        lastSyncedAt: '2026-10-22T20:00:00Z',
+      },
+    });
+
+    const baseData = createMockSuccessResponse('uc-live-001').data!;
+    const singleSnapshotData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22', views: 4500, watchTime: 0, subscribers: 120 },
+        ],
+      },
+    });
+
+    const twoSnapshotsData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22', views: 4500, watchTime: 0, subscribers: 120 },
+          { date: 'Oct 22', views: 5000, watchTime: 0, subscribers: 125 },
+        ],
+      },
+    });
+
+    mockGetDashboardOverview.mockResolvedValueOnce(singleSnapshotData);
+    mockSyncChannel.mockResolvedValue({
+      id: 'chan-001',
+      channelId: 'uc-live-001',
+      title: 'Live Channel',
+      subscriberCount: 125,
+      videoCount: 10,
+      viewCount: 5000,
+      status: 'connected',
+      connectedAt: '2026-10-22T19:00:00Z',
+      lastSyncedAt: '2026-10-22T20:30:00Z',
+    });
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('insufficient-history-state')).toBeInTheDocument();
+    });
+
+    mockGetDashboardOverview.mockResolvedValue(twoSnapshotsData);
+
+    const syncButton = screen.getByTestId('sync-now-insufficient-history');
+    await act(async () => {
+      syncButton.click();
+    });
+
+    await waitFor(() => {
+      expect(mockSyncChannel).toHaveBeenCalled();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('insufficient-history-state')).not.toBeInTheDocument();
+    });
+  });
+
+  // k. sync telemetry failure surfaces error banner without leaving a permanently active loading indicator
+  it('k. sync telemetry failure surfaces error banner without leaving a permanently active loading indicator', async () => {
+    mockGetConnectionStatus.mockResolvedValue({
+      connected: true,
+      channel: {
+        id: 'chan-001',
+        channelId: 'uc-live-001',
+        title: 'Live Channel',
+        subscriberCount: 100,
+        videoCount: 10,
+        viewCount: 1000,
+        status: 'connected',
+        connectedAt: '2026-10-22T19:00:00Z',
+        lastSyncedAt: '2026-10-22T20:00:00Z',
+      },
+    });
+
+    const baseData = createMockSuccessResponse('uc-live-001').data!;
+    const singleSnapshotData = createMockSuccessResponse('uc-live-001', {
+      data: {
+        ...baseData,
+        channelId: 'uc-live-001',
+        velocityChart: [
+          { date: 'Oct 22', views: 4500, watchTime: 0, subscribers: 120 },
+        ],
+      },
+    });
+
+    mockGetDashboardOverview.mockResolvedValueOnce(singleSnapshotData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="LIVE" initialChannelId="uc-live-001">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('insufficient-history-state')).toBeInTheDocument();
+    });
+
+    const syncButton = screen.getByTestId('sync-now-insufficient-history');
+    expect(syncButton).not.toBeDisabled();
+
+    // Mock telemetry sync failure with a server error
+    mockSyncChannel.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: {
+        status: 500,
+        data: { message: 'YouTube telemetry sync failed' },
+      },
+      message: 'Internal Server Error',
+    });
+
+    await act(async () => {
+      syncButton.click();
+    });
+
+    await waitFor(() => {
+      expect(mockSyncChannel).toHaveBeenCalled();
+    });
+
+    // Error banner should be surfaced, not swallowed
+    await waitFor(() => {
+      expect(screen.getByTestId('api-error-banner')).toBeInTheDocument();
+    });
+
+    // Loading should be deactivated, button should be re-enabled
+    expect(syncButton).not.toBeDisabled();
+  });
+
+  // l. demo mode clicking sync now refetches overview without calling syncTelemetry
+  it('l. demo mode clicking sync now refetches overview without calling syncTelemetry', async () => {
+    const demoData = createMockSuccessResponse('demo-channel-1', {
+      data_state: 'STALE',
+    });
+    mockGetDashboardOverview.mockResolvedValue(demoData);
+
+    render(
+      <MemoryRouter>
+        <AppModeProvider initialDataState="STALE" initialChannelId="demo-channel-1">
+          <DashboardPage />
+        </AppModeProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('stale-banner')).toBeInTheDocument();
+    });
+
+    const staleBanner = screen.getByTestId('stale-banner');
+    const syncButton = within(staleBanner).getByRole('button', { name: /sync now/i });
+    expect(syncButton).not.toBeDisabled();
+
+    await act(async () => {
+      syncButton.click();
+    });
+
+    await waitFor(() => {
+      // Called on mount and again on sync
+      expect(mockGetDashboardOverview).toHaveBeenCalledTimes(2);
+    });
+
+    // Live YouTube sync must NOT be called in demo mode
+    expect(mockSyncChannel).not.toHaveBeenCalled();
+    expect(syncButton).not.toBeDisabled();
   });
 });
