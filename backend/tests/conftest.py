@@ -1,5 +1,12 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+
+# Ensure TestClient retains its own methods so that monkeypatching or mocking
+# httpx.Client (e.g. for external Google/Gemini/YouTube APIs) does not hijack TestClient itself.
+if issubclass(TestClient, httpx.Client):
+    for _m in ["get", "post", "put", "patch", "delete", "options", "head", "request"]:
+        setattr(TestClient, _m, getattr(httpx.Client, _m))
 
 from app.core.config import get_settings
 from app.db.session import check_database, reset_engine
