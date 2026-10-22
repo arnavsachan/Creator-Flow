@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 import httpx
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.security import (
     decrypt_token,
     encrypt_token,
@@ -39,6 +39,46 @@ REQUIRED_SCOPES = [
 
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+
+
+def validate_google_oauth_credentials(settings: Optional[Settings] = None) -> None:
+    """
+    Validates that Google OAuth Client ID and Secret are configured and not placeholders.
+    Fails with a clear backend configuration error (HTTP 503) if required credentials are absent,
+    rather than redirecting to Google with an invalid client.
+    """
+    current_settings = settings or get_settings()
+    cid = (current_settings.GOOGLE_CLIENT_ID or "").strip()
+    sec = (current_settings.GOOGLE_CLIENT_SECRET or "").strip()
+
+    is_placeholder_id = (
+        not cid
+        or any(ph in cid.lower() for ph in ["your-google-client-id", "placeholder", "replace-with", "example"])
+        or not cid.endswith(".apps.googleusercontent.com")
+        or "-" not in cid
+    )
+    is_placeholder_sec = (
+        not sec
+        or any(ph in sec.lower() for ph in ["your-google-client-secret", "placeholder", "replace-with", "example"])
+        or len(sec) < 10
+    )
+
+    if is_placeholder_id or is_placeholder_sec:
+        missing = []
+        if is_placeholder_id:
+            missing.append("GOOGLE_CLIENT_ID (must be a valid Google Cloud Web application client ending with .apps.googleusercontent.com)")
+        if is_placeholder_sec:
+            missing.append("GOOGLE_CLIENT_SECRET (must be a valid Google Cloud client secret)")
+        detail_msg = (
+            f"Google OAuth credentials are not properly configured on the backend. "
+            f"Missing or invalid: {'; '.join(missing)}. "
+            "Please configure valid GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in backend/.env with your Google Cloud Web application client."
+        )
+        logger.error(detail_msg)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail_msg,
+        )
 
 
 def has_analytics_permission(channel: Optional[ConnectedChannel]) -> bool:
@@ -79,12 +119,19 @@ def start_youtube_oauth(
 ) -> tuple[str, str]:
     """
     Initiates Google OAuth 2.0 flow for YouTube channel connection.
-    Generates state and PKCE verifier/challenge, persists state in DB,
-    and returns (authorization_url, state).
+    Validates backend credentials, generates state and PKCE verifier/challenge,
+    persists state in DB, and returns (authorization_url, state).
     If include_analytics is True, adds the yt-analytics.readonly scope.
     """
     settings = get_settings()
-    actual_redirect_uri = redirect_uri or settings.GOOGLE_REDIRECT_URI
+    validate_google_oauth_credentials(settings)
+
+    actual_redirect_uri = (redirect_uri or settings.GOOGLE_REDIRECT_URI or "").strip()
+    if not actual_redirect_uri or not (actual_redirect_uri.startswith("http://") or actual_redirect_uri.startswith("https://")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid redirect_uri '{actual_redirect_uri}'. Must be an absolute HTTP or HTTPS URL.",
+        )
 
     state = generate_oauth_state()
     code_verifier, code_challenge = generate_pkce_pair()
@@ -128,6 +175,8 @@ def exchange_code_for_tokens(
     Exchanges authorization code and PKCE code_verifier for Google OAuth tokens.
     """
     settings = get_settings()
+    validate_google_oauth_credentials(settings)
+
     data = {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "client_secret": settings.GOOGLE_CLIENT_SECRET,
@@ -368,6 +417,7 @@ def refresh_access_token(db: Session, channel: ConnectedChannel) -> str:
     """
     Refreshes the YouTube access token using the encrypted refresh token stored at rest.
     Updates the database with the fresh encrypted access token and expiration.
+    Handles invalid_grant, missing refresh tokens, decryption failures, and credential errors distinctly.
     """
     now = datetime.now(timezone.utc)
     if (
@@ -375,18 +425,32 @@ def refresh_access_token(db: Session, channel: ConnectedChannel) -> str:
         and channel.token_expires_at
         and (channel.token_expires_at.replace(tzinfo=timezone.utc) if channel.token_expires_at.tzinfo is None else channel.token_expires_at) > now + timedelta(minutes=2)
     ):
-        return decrypt_token(channel.encrypted_access_token)
+        try:
+            return decrypt_token(channel.encrypted_access_token)
+        except Exception as exc:
+            logger.warning("Decryption of cached access token failed for channel %s: %s. Falling through to refresh.", channel.channel_id, exc)
 
     if not channel.encrypted_refresh_token:
         channel.status = "expired"
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No refresh token available. Re-authentication required.",
+            detail="No refresh token available. Re-authentication required. Please reconnect your YouTube channel.",
         )
 
-    refresh_token = decrypt_token(channel.encrypted_refresh_token)
+    try:
+        refresh_token = decrypt_token(channel.encrypted_refresh_token)
+    except Exception as exc:
+        channel.status = "expired"
+        db.commit()
+        logger.error("Refresh token decryption failed for channel %s: %s", channel.channel_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Stored OAuth token could not be decrypted (encryption key mismatch). Re-authentication required. Please reconnect your YouTube channel.",
+        )
+
     settings = get_settings()
+    validate_google_oauth_credentials(settings)
 
     data = {
         "client_id": settings.GOOGLE_CLIENT_ID,
@@ -401,11 +465,31 @@ def refresh_access_token(db: Session, channel: ConnectedChannel) -> str:
             if resp.status_code != 200:
                 channel.status = "expired"
                 db.commit()
-                logger.warning("Token refresh failed with status %s: %s", resp.status_code, resp.text)
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="OAuth token refresh failed. Re-authentication required.",
+                err_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                err_code = err_data.get("error", "token_refresh_failed")
+                err_desc = err_data.get("error_description", "")
+                logger.warning(
+                    "Token refresh failed for channel %s with status %s: error=%s, desc=%s",
+                    channel.channel_id, resp.status_code, err_code, err_desc,
                 )
+
+                if err_code == "invalid_grant":
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="YouTube access has been revoked or the refresh token has expired (invalid_grant). Re-authentication required. Please reconnect your YouTube channel.",
+                    )
+                elif err_code == "invalid_client":
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Google OAuth client credentials rejected by Google (invalid_client). Please verify GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in backend/.env.",
+                    )
+                else:
+                    detail_msg = f"OAuth token refresh failed ({err_code}: {err_desc}). Re-authentication required. Please reconnect your YouTube channel." if err_desc else "OAuth token refresh failed. Re-authentication required. Please reconnect your YouTube channel."
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=detail_msg,
+                    )
+
             token_data = resp.json()
             new_access_token = token_data.get("access_token")
             expires_in = token_data.get("expires_in", 3600)
@@ -419,6 +503,7 @@ def refresh_access_token(db: Session, channel: ConnectedChannel) -> str:
                 channel.scope = token_data.get("scope")
             channel.status = "connected"
             db.commit()
+            db.refresh(channel)
             return new_access_token
     except httpx.RequestError as exc:
         raise HTTPException(
@@ -497,6 +582,16 @@ def sync_channel_metrics(db: Session, user: User) -> ConnectedChannel:
     """
     channel = get_user_connected_channel(db, user.id)
     if not channel:
+        expired = (
+            db.query(ConnectedChannel)
+            .filter(ConnectedChannel.user_id == user.id, ConnectedChannel.status == "expired")
+            .first()
+        )
+        if expired:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="YouTube channel authorization has expired. Re-authentication required. Please reconnect your YouTube channel.",
+            )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No connected YouTube channel found.",

@@ -25,11 +25,8 @@ if config.config_file_name is not None:
 
 # Set database URL dynamically from application settings
 settings = get_settings()
-config.set_main_option(
-    "sqlalchemy.url",
-    settings.DATABASE_URL.replace("%", "%%"),
-)
-
+# Escape '%' as '%%' because Alembic's ConfigParser interprets '%' as interpolation syntax
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 # Set target metadata to empty Base metadata
 target_metadata = Base.metadata

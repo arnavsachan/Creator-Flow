@@ -159,8 +159,12 @@ def test_competitor_search_live_api_flow(client: TestClient, db_session, test_us
     db_session.add(channel)
     db_session.commit()
 
-    def mock_get(self, url, headers=None, params=None):
-        if "search" in url:
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
+        if "search" in str(url):
             return httpx.Response(
                 200,
                 json={
@@ -177,9 +181,9 @@ def test_competitor_search_live_api_flow(client: TestClient, db_session, test_us
                     "nextPageToken": "SEARCH_PAGE_2",
                     "pageInfo": {"totalResults": 25},
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        elif "channels" in url:
+        elif "channels" in str(url):
             return httpx.Response(
                 200,
                 json={
@@ -201,9 +205,9 @@ def test_competitor_search_live_api_flow(client: TestClient, db_session, test_us
                         }
                     ]
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        return httpx.Response(404, request=httpx.Request("GET", url))
+        return httpx.Response(404, request=httpx.Request("GET", str(url)))
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
 
@@ -249,8 +253,12 @@ def test_competitor_uploads_live_flow(client: TestClient, db_session, test_user_
     db_session.add(competitor)
     db_session.commit()
 
-    def mock_get(self, url, headers=None, params=None):
-        if "playlistItems" in url:
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
+        if "playlistItems" in str(url):
             return httpx.Response(
                 200,
                 json={
@@ -267,9 +275,9 @@ def test_competitor_uploads_live_flow(client: TestClient, db_session, test_user_
                     ],
                     "pageInfo": {"totalResults": 45},
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        elif "videos" in url:
+        elif "videos" in str(url):
             return httpx.Response(
                 200,
                 json={
@@ -291,9 +299,9 @@ def test_competitor_uploads_live_flow(client: TestClient, db_session, test_user_
                         }
                     ]
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        return httpx.Response(404, request=httpx.Request("GET", url))
+        return httpx.Response(404, request=httpx.Request("GET", str(url)))
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
 
@@ -414,4 +422,3 @@ def test_thumbnail_resolution_fallback_and_normalization():
         "https://example.com/fallback.jpg"
     )
     assert extract_best_thumbnail_url(None) is None
-

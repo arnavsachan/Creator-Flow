@@ -182,12 +182,19 @@ def get_connection_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConnectionStatusResponse:
-    channel = get_user_connected_channel(db, current_user.id)
+    channel = (
+        db.query(ConnectedChannel)
+        .filter(ConnectedChannel.user_id == current_user.id)
+        .filter(ConnectedChannel.status.in_(["connected", "expired"]))
+        .order_by(ConnectedChannel.connected_at.desc())
+        .first()
+    )
     if not channel:
         return ConnectionStatusResponse(connected=False, channel=None)
 
+    is_connected = channel.status == "connected"
     return ConnectionStatusResponse(
-        connected=True,
+        connected=is_connected,
         channel=ConnectedChannelResponse.model_validate(channel),
     )
 
@@ -291,9 +298,13 @@ def get_channel_analytics(
 
                 if traffic_report.data_state == "SERVICE_DISABLED" or overview_report.data_state == "SERVICE_DISABLED":
                     analytics_error = "SERVICE_DISABLED"
+                    settings = get_settings()
+                    proj_num = settings.google_cloud_project_number
+                    proj_str = f" ({proj_num})" if proj_num else ""
+                    proj_param = f"?project={proj_num}" if proj_num else ""
                     scope_notice = (
-                        "YouTube Analytics API is not enabled in your Google Cloud Project (198142014140). "
-                        "Please visit https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140 "
+                        f"YouTube Analytics API is not enabled in your Google Cloud Project{proj_str}. "
+                        f"Please visit https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview{proj_param} "
                         "to enable it, then retry."
                     )
                 elif traffic_report.data_state == "AUTHORIZATION_REQUIRED" or overview_report.data_state == "AUTHORIZATION_REQUIRED":
@@ -451,9 +462,13 @@ def get_channel_audience(
 
                 if geo_report.data_state == "SERVICE_DISABLED" or overview_report.data_state == "SERVICE_DISABLED":
                     analytics_error = "SERVICE_DISABLED"
+                    settings = get_settings()
+                    proj_num = settings.google_cloud_project_number
+                    proj_str = f" ({proj_num})" if proj_num else ""
+                    proj_param = f"?project={proj_num}" if proj_num else ""
                     scope_notice = (
-                        "YouTube Analytics API is not enabled in your Google Cloud Project (198142014140). "
-                        "Please visit https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140 "
+                        f"YouTube Analytics API is not enabled in your Google Cloud Project{proj_str}. "
+                        f"Please visit https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview{proj_param} "
                         "to enable it, then retry."
                     )
                     returning_state = "SERVICE_DISABLED"

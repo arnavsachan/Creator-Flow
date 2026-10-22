@@ -195,13 +195,13 @@ export const AudiencePage: React.FC = () => {
                     Google Cloud Action Required: YouTube Analytics API Disabled
                   </div>
                   <p className="text-xs text-amber-300 leading-relaxed">
-                    OAuth scope authorization succeeded, but the <strong>YouTube Analytics API</strong> is not enabled in Google Cloud Project <code>198142014140</code>.
+                    OAuth scope authorization succeeded, but the <strong>YouTube Analytics API</strong> is not enabled in your Google Cloud Project.
                     Enable it in the Google Cloud Console to activate live geography and viewer demographics.
                   </p>
                 </div>
               </div>
               <a
-                href="https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=198142014140"
+                href="https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="shrink-0 px-3.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5"

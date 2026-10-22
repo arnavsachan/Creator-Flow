@@ -87,6 +87,8 @@ export const ChannelsPage: React.FC = () => {
             if (channelIdParam) {
               setSelectedChannelId(channelIdParam);
             }
+          } else if (data.channel && data.channel.status === 'expired') {
+            setConnectedChannel(data.channel);
           } else {
             setConnectedChannel(null);
           }
@@ -258,15 +260,27 @@ export const ChannelsPage: React.FC = () => {
           </h3>
           {connectedChannel && (
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleSyncClick}
-                disabled={syncing}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-                <span>{syncing ? 'Syncing...' : 'Sync Telemetry'}</span>
-              </button>
+              {connectedChannel.status === 'expired' ? (
+                <button
+                  type="button"
+                  onClick={handleConnectClick}
+                  disabled={connecting}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${connecting ? 'animate-spin' : ''}`} />
+                  <span>{connecting ? 'Redirecting...' : 'Reconnect Channel'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSyncClick}
+                  disabled={syncing}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                  <span>{syncing ? 'Syncing...' : 'Sync Telemetry'}</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setShowDisconnectModal(true)}
@@ -311,9 +325,15 @@ export const ChannelsPage: React.FC = () => {
                     <span className="text-base font-semibold text-zinc-100">
                       {connectedChannel.title}
                     </span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-950 text-emerald-400 border border-emerald-800/80">
-                      LIVE
-                    </span>
+                    {connectedChannel.status === 'expired' ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-950 text-amber-400 border border-amber-800/80">
+                        EXPIRED
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-950 text-emerald-400 border border-emerald-800/80">
+                        LIVE
+                      </span>
+                    )}
                     {selectedChannelId === connectedChannel.channelId && (
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700">
                         CURRENTLY ACTIVE
@@ -331,6 +351,23 @@ export const ChannelsPage: React.FC = () => {
                 <span className="text-zinc-300 font-mono text-[11px]">{connectedChannel.channelId}</span>
               </div>
             </div>
+
+            {connectedChannel.status === 'expired' && (
+              <div className="p-3.5 rounded-md bg-amber-950/40 border border-amber-800/60 flex items-center justify-between gap-3 text-xs text-amber-200">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>YouTube OAuth authorization has expired or was revoked. Reconnect your account to restore live metrics.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleConnectClick}
+                  disabled={connecting}
+                  className="px-3 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-medium shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  {connecting ? 'Redirecting...' : 'Reconnect Now'}
+                </button>
+              </div>
+            )}
 
             {/* Metrics Grid */}
             <div className="pt-4 border-t border-zinc-800 grid grid-cols-3 gap-4">
@@ -358,7 +395,9 @@ export const ChannelsPage: React.FC = () => {
             </div>
 
             <div className="flex items-center justify-between text-[11px] text-zinc-500 pt-1">
-              <span>Status: <strong className="text-emerald-400 font-medium">OAuth 2.0 Authenticated</strong></span>
+              <span>Status: <strong className={connectedChannel.status === 'expired' ? 'text-amber-400 font-medium' : 'text-emerald-400 font-medium'}>
+                {connectedChannel.status === 'expired' ? 'Authorization Expired — Reconnect Required' : 'OAuth 2.0 Authenticated'}
+              </strong></span>
               <span>
                 Last Synced:{' '}
                 {new Date(connectedChannel.lastSyncedAt).toLocaleString(undefined, {

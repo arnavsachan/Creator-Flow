@@ -199,4 +199,54 @@ describe('ChannelsPage Tests', () => {
       expect(screen.getByText('No YouTube Channel Connected')).toBeInTheDocument();
     });
   });
+
+  it('renders expired channel warning banner and triggers reconnect flow when clicked', async () => {
+    mockGetConnectionStatus.mockResolvedValueOnce({
+      connected: false,
+      channel: {
+        id: 'chan_expired',
+        channelId: 'UC_EXPIRED_123',
+        title: 'Expired Creator Channel',
+        customUrl: '@ExpiredCreator',
+        thumbnailUrl: null,
+        subscriberCount: 12000,
+        videoCount: 45,
+        viewCount: 980000,
+        status: 'expired',
+        connectedAt: '2026-10-10T00:00:00Z',
+        lastSyncedAt: '2026-10-15T00:00:00Z',
+      },
+    });
+    mockStartOAuth.mockResolvedValueOnce({
+      authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?test=reconnect',
+      state: 'state_reconnect',
+    });
+
+    render(
+      <AppModeProvider>
+        <ChannelsPage />
+      </AppModeProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Expired Creator Channel')).toBeInTheDocument();
+    });
+
+    // Check EXPIRED badge and warning banner
+    expect(screen.getByText('EXPIRED')).toBeInTheDocument();
+    expect(
+      screen.getByText(/YouTube OAuth authorization has expired or was revoked/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Authorization Expired — Reconnect Required/i)
+    ).toBeInTheDocument();
+
+    // Click Reconnect button
+    const reconnectBtn = screen.getByRole('button', { name: /reconnect now/i });
+    fireEvent.click(reconnectBtn);
+
+    await waitFor(() => {
+      expect(mockStartOAuth).toHaveBeenCalledTimes(1);
+    });
+  });
 });

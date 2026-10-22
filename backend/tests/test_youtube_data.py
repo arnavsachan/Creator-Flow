@@ -74,8 +74,12 @@ def test_get_channel_details_live_success(client: TestClient, db_session, monkey
     token = create_access_token(data={"sub": user.id})
     auth_headers = {"Authorization": f"Bearer {token}"}
 
-    def mock_get(self, url, headers=None, params=None):
-        if "channels" in url and params.get("id") == "UC_LIVE_DETAILS_1":
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
+        if "channels" in str(url) and (params or {}).get("id") == "UC_LIVE_DETAILS_1":
             return httpx.Response(
                 200,
                 json={
@@ -115,9 +119,9 @@ def test_get_channel_details_live_success(client: TestClient, db_session, monkey
                         }
                     ]
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        return httpx.Response(404, request=httpx.Request("GET", url))
+        return httpx.Response(404, request=httpx.Request("GET", str(url)))
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
 
@@ -174,7 +178,11 @@ def test_get_channel_details_service_disabled(client: TestClient, db_session, mo
     token = create_access_token(data={"sub": user.id})
     auth_headers = {"Authorization": f"Bearer {token}"}
 
-    def mock_get(self, url, headers=None, params=None):
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
         return httpx.Response(
             403,
             json={
@@ -184,7 +192,7 @@ def test_get_channel_details_service_disabled(client: TestClient, db_session, mo
                     "errors": [{"reason": "accessNotConfigured"}],
                 }
             },
-            request=httpx.Request("GET", url),
+            request=httpx.Request("GET", str(url)),
         )
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
@@ -253,7 +261,11 @@ def test_get_channel_details_quota_exceeded(client: TestClient, db_session, monk
     token = create_access_token(data={"sub": user.id})
     auth_headers = {"Authorization": f"Bearer {token}"}
 
-    def mock_get(self, url, headers=None, params=None):
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
         return httpx.Response(
             403,
             json={
@@ -263,7 +275,7 @@ def test_get_channel_details_quota_exceeded(client: TestClient, db_session, monk
                     "errors": [{"reason": "quotaExceeded"}],
                 }
             },
-            request=httpx.Request("GET", url),
+            request=httpx.Request("GET", str(url)),
         )
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
@@ -367,9 +379,13 @@ def test_get_content_library_live_uploads_playlist_flow(client: TestClient, db_s
     token = create_access_token(data={"sub": user.id})
     auth_headers = {"Authorization": f"Bearer {token}"}
 
-    def mock_get(self, url, headers=None, params=None):
-        if "playlistItems" in url:
-            assert params.get("playlistId") == "UU_LIB_LIVE_1"
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
+        if "playlistItems" in str(url):
+            assert (params or {}).get("playlistId") == "UU_LIB_LIVE_1"
             return httpx.Response(
                 200,
                 json={
@@ -402,11 +418,11 @@ def test_get_content_library_live_uploads_playlist_flow(client: TestClient, db_s
                         },
                     ],
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        elif "videos" in url:
-            assert "vid_live_1" in params.get("id")
-            assert "vid_live_3" in params.get("id")
+        elif "videos" in str(url):
+            assert "vid_live_1" in (params or {}).get("id", "")
+            assert "vid_live_3" in (params or {}).get("id", "")
             return httpx.Response(
                 200,
                 json={
@@ -455,9 +471,9 @@ def test_get_content_library_live_uploads_playlist_flow(client: TestClient, db_s
                         },
                     ]
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        return httpx.Response(404, request=httpx.Request("GET", url))
+        return httpx.Response(404, request=httpx.Request("GET", str(url)))
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
 
@@ -515,7 +531,11 @@ def test_get_content_library_service_disabled(client: TestClient, db_session, mo
     token = create_access_token(data={"sub": user.id})
     auth_headers = {"Authorization": f"Bearer {token}"}
 
-    def mock_get(self, url, headers=None, params=None):
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
         return httpx.Response(
             403,
             json={
@@ -525,7 +545,7 @@ def test_get_content_library_service_disabled(client: TestClient, db_session, mo
                     "errors": [{"reason": "SERVICE_DISABLED"}],
                 }
             },
-            request=httpx.Request("GET", url),
+            request=httpx.Request("GET", str(url)),
         )
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
@@ -561,7 +581,11 @@ def test_get_content_library_timeout_handling(client: TestClient, db_session, mo
     token = create_access_token(data={"sub": user.id})
     auth_headers = {"Authorization": f"Bearer {token}"}
 
-    def mock_timeout(self, url, headers=None, params=None):
+    original_get = httpx.Client.get
+
+    def mock_timeout(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
         raise httpx.TimeoutException("Upstream timed out")
 
     monkeypatch.setattr(httpx.Client, "get", mock_timeout)
@@ -628,14 +652,18 @@ def test_sync_channel_videos_persists_duration(db_session, monkeypatch):
     db_session.add(channel)
     db_session.commit()
 
-    def mock_get(self, url, headers=None, params=None):
-        if "channels" in url:
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, headers=None, params=None, *args, **kwargs):
+        if "googleapis.com" not in str(url):
+            return original_get(self, url, headers=headers, params=params, *args, **kwargs)
+        if "channels" in str(url):
             return httpx.Response(
                 200,
                 json={"items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UU_SYNC_DUR"}}}]},
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        elif "playlistItems" in url:
+        elif "playlistItems" in str(url):
             return httpx.Response(
                 200,
                 json={
@@ -646,9 +674,9 @@ def test_sync_channel_videos_persists_duration(db_session, monkeypatch):
                         }
                     ]
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        elif "videos" in url:
+        elif "videos" in str(url):
             return httpx.Response(
                 200,
                 json={
@@ -665,9 +693,9 @@ def test_sync_channel_videos_persists_duration(db_session, monkeypatch):
                         }
                     ]
                 },
-                request=httpx.Request("GET", url),
+                request=httpx.Request("GET", str(url)),
             )
-        return httpx.Response(404, request=httpx.Request("GET", url))
+        return httpx.Response(404, request=httpx.Request("GET", str(url)))
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
 
