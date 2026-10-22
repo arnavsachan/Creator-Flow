@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -36,6 +36,9 @@ class ChannelVideo(Base):
         index=True,
     )
     thumbnail_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    duration: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     view_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     like_count: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     comment_count: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

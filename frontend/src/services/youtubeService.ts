@@ -3,10 +3,13 @@ import type {
   AnalyticsOverviewReportResponse,
   AnalyticsTelemetryResponse,
   AudienceTelemetryResponse,
+  ChannelDetailsResponse,
   ChannelHistoryResponse,
   ChannelVideosResponse,
   ConnectedChannel,
   ConnectionStatusResponse,
+  ContentLibraryParams,
+  ContentLibraryResponse,
   DisconnectResponse,
   GeographicAudienceReportResponse,
   OAuthStartResponse,
@@ -214,6 +217,48 @@ export async function getAudienceGeography(
   return response.data;
 }
 
+/**
+ * Fetches rich connected channel details from YouTube Data API v3.
+ */
+export async function getChannelDetails(
+  channelId?: string,
+  signal?: AbortSignal
+): Promise<ChannelDetailsResponse> {
+  await ensureAuthenticatedSession();
+  const params: Record<string, string> = {};
+  if (channelId) {
+    params.channel_id = channelId;
+  }
+  const response = await apiClient.get<ChannelDetailsResponse>('/youtube/channel/details', {
+    params,
+    signal,
+  });
+  return response.data;
+}
+
+/**
+ * Fetches uploaded video list with duration, publish dates, metadata, and public statistics
+ * using the uploads playlist approach with pagination and search/filtering support.
+ */
+export async function getContentLibrary(
+  params?: ContentLibraryParams,
+  signal?: AbortSignal
+): Promise<ContentLibraryResponse> {
+  await ensureAuthenticatedSession();
+  const queryParams: Record<string, string | number> = {};
+  if (params?.channelId) queryParams.channel_id = params.channelId;
+  if (params?.pageToken) queryParams.page_token = params.pageToken;
+  if (params?.maxResults) queryParams.max_results = params.maxResults;
+  if (params?.q) queryParams.q = params.q;
+  if (params?.order) queryParams.order = params.order;
+
+  const response = await apiClient.get<ContentLibraryResponse>('/youtube/content-library', {
+    params: queryParams,
+    signal,
+  });
+  return response.data;
+}
+
 export default {
   ensureAuthenticatedSession,
   getConnectionStatus,
@@ -227,4 +272,6 @@ export default {
   getAnalyticsOverview,
   getTrafficSources,
   getAudienceGeography,
+  getChannelDetails,
+  getContentLibrary,
 };
